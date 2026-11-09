@@ -1,0 +1,1 @@
+<%* const m = { exports: {} }; new Function("module", "exports", await (tp.app || app).vault.adapter.read("Tracker/Scripts/ptrack.js"))(m, m.exports); await m.exports(tp, "planProject"); -%>

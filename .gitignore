@@ -1,0 +1,12 @@
+# Obsidian per-device state
+.obsidian/workspace*.json
+.obsidian/cache
+.trash/
+
+# Tracker iPhone LLM handoff files
+Tracker/AI/
+
+# Source archive
+*.zip
+
+.DS_Store
