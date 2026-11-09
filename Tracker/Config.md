@@ -11,6 +11,7 @@ goals_max: 7
 neglect_weeks: 3
 plan_next_week_from: 5
 plan_schedule_tasks: true
+plan_due_dates: true
 upcoming_days: 7
 task_tag: ""
 llm_provider: ollama
@@ -37,6 +38,7 @@ Edit the values in the properties above. This note syncs, so both your Mac and y
 | `neglect_weeks` | An active project that hasn't been in focus for this many weeks is flagged. |
 | `plan_next_week_from` | From this weekday (1 = Mon … 7 = Sun), **Plan week** suggests next week first. |
 | `plan_schedule_tasks` | `true`: when you add a task to a goal, you choose the day (sets the Tasks ⏳ scheduled date). |
+| `plan_due_dates` | `true`: when you add a task to a goal, you can also set a deadline (the Tasks 📅 due date): a day of that week, or any other date. |
 | `upcoming_days` | How many days ahead Home looks (after today) for *Next N days* and the *Outside focus* box. |
 | `task_tag` | If you use a Tasks *global filter* tag (e.g. `#task`), put it here so new tasks get it. Otherwise leave `""`. |
 | `llm_provider` | `ollama`, or `openai` for any OpenAI-compatible server (LM Studio, llama.cpp, Jan). |

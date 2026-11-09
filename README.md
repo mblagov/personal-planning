@@ -90,7 +90,7 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 |---|---|---|
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
 | When convenient | **Process inbox** | The local LLM suggests a project, a type (task / idea / reference), and a priority. Confident items are filed automatically. |
-| Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day. |
+| Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
 | During the week | **Home** | Shows today's tasks, the next 7 days, and tasks due *outside this week's focus* |
 | Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records wins, lessons, and energy. |
 | Anytime | **New project**, **Register projects** | Adds projects |

@@ -33,6 +33,7 @@ const DEFAULTS = {
   llm_provider_mobile: "",
   llm_model_mobile: "",
   plan_schedule_tasks: true,
+  plan_due_dates: true,
   upcoming_days: 7,
   task_tag: "",
 };
@@ -1125,9 +1126,44 @@ async function addTasksToGoal(app, wp, goalIndex, blocks) {
   });
 }
 
-/** Ask which day of the target week to do a task; sets the Tasks ⏳ scheduled date. */
+/** When planning a task: ask the day to do it (⏳ scheduled), then its deadline (📅 due). Each step can be turned off in Config. */
 async function askSchedule(env, cfg, target, line) {
-  if (!cfg.plan_schedule_tasks) return line;
+  if (cfg.plan_schedule_tasks) line = await askScheduled(env, target, line);
+  if (cfg.plan_due_dates) line = await askDue(env, target, line);
+  return line;
+}
+const taskDesc = (line) => stripFields(splitMeta(line.replace(/^\s*[-*+]\s+\[.\]\s*/, "")).head);
+const isIsoDate = (s, env) => /^\d{4}-\d{2}-\d{2}$/.test(s) && env.moment(s, "YYYY-MM-DD").format("YYYY-MM-DD") === s;
+/** Ask for a deadline: days of the target week from the scheduled day (or today) on, or any other date. Sets 📅 due. */
+async function askDue(env, target, line) {
+  const today = env.moment().format("YYYY-MM-DD");
+  const due = getDate(line, "due"), sched = getDate(line, "scheduled");
+  const from = sched && sched > today ? sched : today;
+  const day = (iso) => env.moment(iso, "YYYY-MM-DD").format("ddd D MMM");
+  const opts = due ? [[`Keep 📅 ${day(due)}`, due], ["Remove deadline", ""]] : [["No deadline", ""]];
+  const s = weekStart(target);
+  for (let i = 0; i < 7; i++) {
+    const iso = s.clone().add(i, "days").format("YYYY-MM-DD");
+    if (iso < from || iso === due) continue;
+    opts.push([`${day(iso)}${iso === today ? " · today" : ""}${iso === sched ? " · ⏳ scheduled" : ""}`, iso]);
+  }
+  opts.push(["Other date…", "other"]);
+  let v = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), `📅 Deadline for “${taskDesc(line)}”?`);
+  if (v === null || v === undefined) return line;
+  if (v === "other") {
+    for (;;) {
+      const t = await env.prompt(`📅 Deadline for “${taskDesc(line)}” — date as YYYY-MM-DD (empty = no deadline)`, due || "");
+      if (t === null || t === undefined) return line;
+      v = String(t).trim();
+      if (!v || isIsoDate(v, env)) break;
+      env.notice(`“${v}” isn't a date like ${today}. Try again.`, 5000);
+    }
+    if (v && sched && v < sched) env.notice(`Note: the deadline (${v}) is before the scheduled day (${sched}).`, 7000);
+  }
+  return setDate(line, "due", v || null);
+}
+/** Ask which day of the target week to do a task; sets the Tasks ⏳ scheduled date. */
+async function askScheduled(env, target, line) {
   const today = env.moment().format("YYYY-MM-DD");
   const cur = getDate(line, "scheduled"), due = getDate(line, "due");
   const desc = stripFields(splitMeta(line.replace(/^\s*[-*+]\s+\[.\]\s*/, "")).head);
