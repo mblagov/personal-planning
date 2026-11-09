@@ -90,7 +90,7 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 |---|---|---|
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
 | When convenient | **Process inbox** | The local LLM suggests a project, a type (task / idea / reference), and a priority. Confident items are filed automatically. |
-| Start of week | **Plan week** / **Plan project** | Pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day |
+| Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day. |
 | During the week | **Home** | Shows today's tasks, the next 7 days, and tasks due *outside this week's focus* |
 | Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records wins, lessons, and energy. |
 | Anytime | **New project**, **Register projects** | Adds projects |
@@ -133,6 +133,7 @@ keywords: [boat, marina, berth]
 - `[from:: …]` lists the earlier weeks a task or goal was carried over from. Those weeks count it as planned but not done.
 - `[result:: 0–100]` and `[miss:: no-time | blocked | deprioritized | underestimated | motivation | unclear]` are written by the weekly review.
 - `[-]` marks a dropped task, which doesn't count toward any score.
+- Every task the tracker adds gets a ➕ created date: the capture date for inbox items, today for tasks typed while planning.
 - Dates use the Tasks plugin's emoji: 📅 due, ⏳ scheduled, 🛫 start, ➕ created, ✅ done. Priorities use ⏫ 🔼 🔽.
 
 ## What's in the samples

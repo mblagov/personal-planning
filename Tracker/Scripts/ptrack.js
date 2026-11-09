@@ -754,7 +754,9 @@ async function cmdCapture(env) {
   if (!text || !text.trim()) return;
   await ensureInbox(app, cfg);
   const items = text.split(/\r?\n/).map((s) => s.trim().replace(/^[-*]\s+(\[.\]\s+)?/, "")).filter(Boolean);
-  await editLines(app, cfg.inbox, (lines) => insertIntoSection(lines, "Queue", items.map((t) => `- [ ] ${t}`)));
+  const today = env.moment().format("YYYY-MM-DD");
+  // ➕ = when you captured it; filing later keeps this date.
+  await editLines(app, cfg.inbox, (lines) => insertIntoSection(lines, "Queue", items.map((t) => withCreated(`- [ ] ${t}`, today))));
   env.notice(`Inbox: +${items.length}`);
 }
 
@@ -862,8 +864,11 @@ function newTask(cfg, line, today) {
   let out = /^\s*[-*+]\s+\[.\]/.test(line) ? line.replace(/^\s+/, "") : `- [ ] ${line.replace(/^\s*[-*+]\s+/, "").trim()}`;
   const tag = String(cfg.task_tag || "").trim();
   if (tag && !out.includes(tag)) out = out.replace(/^(- \[.\] )/, `$1${tag} `);
-  if (!getDate(out, "created")) out = setDate(out, "created", today);
-  return out;
+  return withCreated(out, today);
+}
+/** Add a ➕ created date unless the line already has one (an earlier date always wins). */
+function withCreated(line, date) {
+  return getDate(line, "created") ? line : setDate(line, "created", date);
 }
 
 /** Move one inbox line (by exact text) to a project / week goal. */
@@ -877,7 +882,7 @@ async function fileItem(app, cfg, raw, dest) {
   if (dest.planWeek) out = setField(out, "week", dest.planWeek);
   if (dest.kind !== "task" && !dest.planWeek) {
     const icon = dest.kind === "idea" ? "💡" : "📎";
-    out = `- ${icon} ${it.desc} (${today})`;
+    out = `- ${icon} ${it.desc} (${getDate(it.raw, "created") || today})`;
   }
   const section = dest.planWeek ? PLANNED_SEC : dest.kind === "task" ? "Backlog" : "Notes & ideas";
   await editLines(app, dest.projectPath, (ls) => insertIntoProjectSection(ls, section, [out]));
@@ -1147,6 +1152,7 @@ async function addPlanned(app, projectPath, lines) {
 async function pickTasks(env, project, header, target) {
   const { app } = env, cfg = getConfig(app);
   const today = env.moment().format("YYYY-MM-DD");
+  await tidyPlanned(env, project);
   const lines0 = (await readPath(app, project.path)).split("\n");
   const already = parseItems(lines0).filter((t) => t.task && isOpen(t) && weekIds(t.fields.week)[0] === target).length;
   const remaining = backlogItems(lines0).sort(byPrioDue);
@@ -1321,21 +1327,65 @@ async function archiveDone(app, d, id) {
   for (const p of d.projects) {
     const content = await app.vault.read(p.file);
     if (!content.includes(`[week:: ${id}]`)) continue;
-    await editLines(app, p.path, (ls) => {
-      const sec = findSection(ls, PLANNED_SEC);
-      if (!sec) return;
-      const done = parseItems(ls, sec.start, sec.end).filter((t) => t.task && !t.parent && isDone(t) && weekIds(t.fields.week)[0] === id);
-      const moved = [];
-      for (const t of done.reverse()) {
-        const end = blockEnd(ls, t);
-        moved.unshift(...dedent(ls.slice(t.line, end), t.ws).filter((l) => l.trim() !== ""));
-        ls.splice(t.line, end - t.line);
-        n++;
-      }
-      insertIntoSection(ls, DONE_SEC, moved);
-    });
+    await editLines(app, p.path, (ls) => { n += moveDoneOut(ls, (t) => weekIds(t.fields.week)[0] === id); });
   }
   return n;
+}
+/** Move finished top-level tasks (with their sub-items) from ## Planned to ## Done. `keep(t)` filters which. Returns how many. */
+function moveDoneOut(ls, keep = () => true) {
+  const sec = findSection(ls, PLANNED_SEC);
+  if (!sec) return 0;
+  const done = parseItems(ls, sec.start, sec.end).filter((t) => t.task && !t.parent && isDone(t) && keep(t));
+  const moved = [];
+  for (const t of done.reverse()) {
+    const end = blockEnd(ls, t);
+    moved.unshift(...dedent(ls.slice(t.line, end), t.ws).filter((l) => l.trim() !== ""));
+    ls.splice(t.line, end - t.line);
+  }
+  insertIntoSection(ls, DONE_SEC, moved);
+  return done.length;
+}
+function tasksPluginApi(app) {
+  const p = app.plugins && app.plugins.plugins && app.plugins.plugins["obsidian-tasks-plugin"];
+  return p && p.apiV1 && p.apiV1.executeToggleTaskDoneCommand ? p.apiV1 : null;
+}
+/**
+ * Before planning a project: for each open task in ## Planned, ask whether it's actually done
+ * (marking goes through the Tasks plugin when present, so ✅ dates and 🔁 repeats work),
+ * then move every done task in ## Planned to ## Done.
+ */
+async function tidyPlanned(env, project) {
+  const { app } = env;
+  const today = env.moment().format("YYYY-MM-DD");
+  const api = tasksPluginApi(app);
+  const lines0 = (await readPath(app, project.path)).split("\n");
+  const sec = findSection(lines0, PLANNED_SEC);
+  if (!sec) return;
+  const open = parseItems(lines0, sec.start, sec.end).filter((t) => t.task && !t.parent && isOpen(t));
+  let marked = 0;
+  for (let i = 0; i < open.length; i++) {
+    const t = open[i];
+    const wk = weekIds(t.fields.week)[0];
+    const c = await env.suggest(
+      ["Not yet", "✔ Done — mark it done", "Stop asking — keep the rest as they are"], ["no", "yes", "stop"],
+      `${project.name} · open in ${PLANNED_SEC} ${i + 1}/${open.length}${wk ? ` · ${shortWeek(wk)}` : ""}: “${t.desc}” — done?`);
+    if (c === "stop" || c === null || c === undefined) break;
+    if (c !== "yes") continue;
+    const raw = t.raw.replace(/^[ \t]+/, "");
+    const next = api ? await api.executeToggleTaskDoneCommand(raw, project.path) : toggleDoneLine(raw, today);
+    if (!next || next === raw) continue;
+    let ok = false;
+    await editLines(app, project.path, (ls) => {
+      const k = locateRaw(ls, t.raw, t.line);
+      if (k < 0) return;
+      ls.splice(k, 1, ...String(next).split("\n").map((l) => t.ws + l));
+      ok = true;
+    });
+    if (ok) marked++;
+  }
+  let moved = 0;
+  await editLines(app, project.path, (ls) => { moved = moveDoneOut(ls); });
+  if (marked || moved) env.notice(`${project.name}: ${marked ? `${marked} marked done · ` : ""}${moved} finished task(s) moved to “${DONE_SEC}”`, 6000);
 }
 
 async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
@@ -1392,6 +1442,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
         if (action === "carry" || action === "return") {
           let copy = setStatus(ls[t.line].replace(/^[ \t]+/, ""), " ");
           copy = setDate(setDate(setDate(copy, "scheduled", null), "done", null), "cancelled", null);
+          copy = withCreated(copy, env.moment().format("YYYY-MM-DD"));
           legacyCopies.push(action === "carry" ? setField(copy, "week", nextId) : copy);
           ls[t.line] = insertBeforeMeta(setStatus(ls[t.line], "-"), action === "carry" ? `⇢ [[${nextId}]]` : "⇢ backlog");
         } else if (action === "drop") ls[t.line] = setStatus(ls[t.line], "-");

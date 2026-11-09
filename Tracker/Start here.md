@@ -29,6 +29,7 @@ Settings → Community plugins → Browse. Install and enable:
 
 **Tasks**
 - Defaults are fine. Keep **Set done date on every completed task** on — the analytics use the ✅ date.
+- Also turn on **Set created date on every added task**, so tasks you make with the Tasks form get a ➕ date too. (Tasks the tracker adds always get one.)
 - If you set a *Global task filter* (e.g. `#task`), put the same tag in `task_tag` in `Tracker/Config`.
 
 ## 3. First run (Mac)
@@ -131,8 +132,8 @@ Good to know:
 Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `🛫` start · `➕` created · `✅` done · `⏫ 🔼 🔽` priority · `🔁` repeat.
 
 - **Where planned tasks live**: in their **project note**, in the `## Planned` section, marked with the week: `- [ ] Call marina [week:: 2026-W46] ⏳ 2026-11-10`. Nothing is copied into the week note.
-- **Plan project** (button on every project page, or the command): choose **this week** or **next week**, optionally write the project's goal for that week, then pick tasks from its `## Backlog` or type new ones. Picked tasks move from Backlog to Planned. For each task you choose a day (Mon–Sun, or no date) — that sets the **⏳ scheduled** date. Existing due dates are kept.
-- **Plan week** does the same for several projects in one go: pick a project → write the goal → pick its tasks → next project.
+- **Plan project** (button on every project page, or the command): choose **this week** or **next week**, optionally write the project's goal for that week, then pick tasks from its `## Backlog` or type new ones. First, it goes through the tasks still open in `## Planned` and asks whether each one is actually done (*Not yet* is the default; Esc stops asking), and moves every finished task in `## Planned` to `## Done`. Picked tasks move from Backlog to Planned. For each task you choose a day (Mon–Sun, or no date) — that sets the **⏳ scheduled** date. Existing due dates are kept.
+- **Plan week** does the same for several projects in one go: pick a project → write the goal → (check open tasks, tidy finished ones) → pick its tasks → next project.
 - **The week note** is the common view: under each goal it lists every task picked for that week in that project, with progress, and you can tick (☐), edit (✎) and open (↗) them there. Projects with picked tasks but no goal are listed too, marked *no goal*.
 - **Any other dates**: put the cursor on a task and run **Tasks: Create or edit task** (Cmd+P, or the command palette on iPhone). It opens a form for due, scheduled and start dates, priority and recurrence. You can also type the emojis directly, including in Capture.
 - **Home** shows only tasks from the projects you picked for this week (*Focus tasks*): **Today**, **Next 7 days** by day, and **Any day this week** (undated tasks under your goals).
@@ -145,6 +146,7 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
 - **Tick tasks** anywhere (Home, week note, project note). Tasks adds the ✅ date.
 - The week dashboard and Analytics also count **Done outside goals**: tasks completed that week anywhere in the vault that weren't part of a goal.
 - Inbox items keep any dates you typed; the classifier adds ⏫/🔽 for clearly high/low priority, and filed tasks get a ➕ created date.
+- **Created dates**: every task the tracker adds to a project gets ➕ — Capture stamps the day you captured it, and filing keeps that date (items typed straight into the inbox get the filing date). New tasks typed during planning get today. A ➕ you wrote yourself is never changed.
 
 ## 7. The weekly loop
 
