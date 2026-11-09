@@ -88,6 +88,7 @@ function shortWeek(id) { return "W" + String(id).slice(-2); }
 const weekIds = (v) => String(v || "").match(/\d{4}-W\d{2}/g) || [];
 const PLANNED_SEC = "Planned";
 const DONE_SEC = "Done";
+const UNPLANNED_SEC = "Unplanned"; // tasks added during the week (Add tasks) — shown like planned ones, told apart in analytics
 
 /* ------------------------------------------------------------------ config */
 
@@ -264,6 +265,11 @@ function insertIntoProjectSection(lines, name, newLines) {
     const b = findSection(lines, "Backlog");
     if (b) { lines.splice(b.head, 0, `## ${name}`, ...newLines, ""); return; }
   }
+  if (!findSection(lines, name) && name === UNPLANNED_SEC) {
+    const pl = findSection(lines, PLANNED_SEC), b = findSection(lines, "Backlog");
+    const at = pl ? pl.end : b ? b.head : -1;
+    if (at >= 0) { lines.splice(at, 0, ...(at > 0 && lines[at - 1].trim() !== "" ? [""] : []), `## ${name}`, ...newLines, ""); return; }
+  }
   insertIntoSection(lines, name, newLines);
 }
 /** Make sure a project note has Planned / Backlog / Notes & ideas sections. Returns true if it changed. */
@@ -357,6 +363,7 @@ function listProjects(app, cfg) {
       scope: String(fm.scope || (root ? root.split("/").pop() : grand) || "").toLowerCase(),
       description: String(fm.description || ""), objective: String(fm.objective || ""),
       keywords: toArr(fm.keywords),
+      routine: String(fm.kind || "").toLowerCase() === "routine",
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -406,13 +413,182 @@ const PRIO_RANK = { highest: 0, high: 1, medium: 2, normal: 3, low: 4, lowest: 5
 const prioRank = (it) => PRIO_RANK[prioOf(it.raw)];
 const byPrioDue = (a, b) => prioRank(a) - prioRank(b) || String(getDate(a.raw, "due") || "9999").localeCompare(String(getDate(b.raw, "due") || "9999"));
 
+/* ------------------------------------------------------------------ routines */
+// A routine project (frontmatter `kind: routine`, one per scope) holds recurring tasks (Tasks 🔁).
+// Each task line is one occurrence of its routine (routines are told apart by their text) and counts in the
+// ISO week of its date: 📅 due, else ⏳ scheduled, else 🛫 start. Routine projects are always in focus,
+// need no weekly goal and are scored separately: done ÷ (done + missed).
+// A missed occurrence (open, date before today) is cancelled as `[-] … [missed:: yes] ❌ <today>` and the next
+// occurrence is created — repeatedly, so every missed day/week/month is recorded.
+
+const RULE_RE = /🔁️?\s*(.+?)\s*(?=(?:📅|🗓️?|⏳|⌛|🛫|➕|✅|❌|🔁|⏫|🔼|🔽|🔺|⏬|🆔|⛔|🏁)|$)/u;
+function ruleOf(line) { const m = String(line).match(RULE_RE); return m ? m[1].trim() : null; }
+function refDate(line) { return getDate(line, "due") || getDate(line, "scheduled") || getDate(line, "start"); }
+function freqOf(rule) {
+  const r = String(rule || "").toLowerCase().replace(/\s+when done$/, "");
+  if (/^every (1 )?day$|^every weekday$/.test(r)) return "daily";
+  if (/^every (\d+ )?weeks?\b/.test(r)) return "weekly";
+  if (/^every (\d+ )?months?\b/.test(r)) return "monthly";
+  if (/^every (\d+ )?years?\b|^every (january|february|march|april|may|june|july|august|september|october|november|december)\b/.test(r)) return "yearly";
+  return "other";
+}
+const isoD = (iso) => new Date(iso + "T00:00:00Z");
+const isoS = (d) => d.toISOString().slice(0, 10);
+function isoAdd(iso, n) { const d = isoD(iso); d.setUTCDate(d.getUTCDate() + n); return isoS(d); }
+const isoDiff = (a, b) => Math.round((isoD(b) - isoD(a)) / 864e5); // b − a, in days
+const isoDow = (iso) => isoD(iso).getUTCDay() || 7;           // 1 = Mon … 7 = Sun
+const DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+function monthsAdd(iso, n, day) {
+  const d = isoD(iso), mo = d.getUTCMonth() + n;
+  const y = d.getUTCFullYear() + Math.floor(mo / 12), m = ((mo % 12) + 12) % 12;
+  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return isoS(new Date(Date.UTC(y, m, day === "last" ? last : Math.min(day || d.getUTCDate(), last))));
+}
+/** Next occurrence after `ref` for the common Tasks rules; null when the rule isn't understood. */
+function nextOccurrence(rule, ref) {
+  const r = String(rule).toLowerCase().replace(/\s+when done$/, "").replace(/\s+/g, " ").trim();
+  let m;
+  if ((m = r.match(/^every (?:(\d+) )?days?$/))) return isoAdd(ref, Number(m[1] || 1));
+  if (r === "every weekday") { let x = isoAdd(ref, 1); while (isoDow(x) > 5) x = isoAdd(x, 1); return x; }
+  if ((m = r.match(/^every (?:(\d+) )?weeks?(?: on (.+))?$/))) {
+    const n = Number(m[1] || 1);
+    if (!m[2]) return isoAdd(ref, 7 * n);
+    const days = m[2].split(/,|\band\b/).map((s) => DAY_NAMES.indexOf(s.trim()) + 1).filter((x) => x > 0).sort((a, b) => a - b);
+    if (!days.length) return null;
+    const dow = isoDow(ref), later = days.find((x) => x > dow);
+    return later ? isoAdd(ref, later - dow) : isoAdd(ref, 7 * n - dow + days[0]);
+  }
+  if ((m = r.match(/^every (?:(\d+) )?months?(?: on the (last|\d+)(?:st|nd|rd|th)?)?$/))) return monthsAdd(ref, Number(m[1] || 1), m[2] ? (m[2] === "last" ? "last" : Number(m[2])) : null);
+  if ((m = r.match(/^every (?:(\d+) )?years?$/))) return monthsAdd(ref, 12 * Number(m[1] || 1), null);
+  return null;
+}
+/** The next occurrence's line: all dates shifted by `delta` days, no done/cancelled date, ➕ today. */
+function shiftOccurrence(line, delta, today) {
+  let out = line;
+  for (const k of ["due", "scheduled", "start"]) { const v = getDate(out, k); if (v) out = setDate(out, k, isoAdd(v, delta)); }
+  out = setDate(setDate(out, "done", null), "cancelled", null);
+  return setDate(out, "created", today);
+}
+function markMissed(line, today) {
+  return setDate(setField(setDate(setStatus(line, "-"), "done", null), "missed", "yes"), "cancelled", today);
+}
+/** Roll one open routine line whose date has passed. → { lines: [next open, …missed newest first], missed } or null. */
+async function rollLine(line, rule, today, api, path) {
+  const whenDone = /\bwhen done\s*$/i.test(rule);
+  const missed = [];
+  let cur = line;
+  for (let guard = 0; guard < 400; guard++) {
+    const ref = refDate(cur);
+    if (!ref || ref >= today) break;
+    const nextIso = whenDone ? today : nextOccurrence(rule, ref);
+    let next;
+    if (nextIso) next = shiftOccurrence(cur, isoDiff(ref, nextIso), today);
+    else if (api) { // a rule we don't parse: let the Tasks plugin compute the next occurrence
+      const out = String((await api.executeToggleTaskDoneCommand(cur, path)) || "").split("\n");
+      next = out.find((l) => /^\s*[-*+]\s+\[ \]/.test(l));
+      if (!next) return null;
+      next = next.replace(/^[ \t]+/, "");
+      if (refDate(next) && refDate(next) <= ref) return null; // no progress — give up rather than loop
+    } else return null;
+    missed.push(markMissed(cur, today));
+    cur = next;
+  }
+  return missed.length ? { lines: [cur, ...missed.reverse()], missed: missed.length } : null;
+}
+/** Cancel every missed occurrence in the active routine projects and create the next ones. Returns { missed, stuck }. */
+async function rollRoutines(app, today) {
+  const cfg = getConfig(app), api = tasksPluginApi(app);
+  let missed = 0;
+  const stuck = [];
+  for (const p of listProjects(app, cfg).filter((x) => x.routine && x.status === "active")) {
+    const lines = (await app.vault.read(p.file)).split("\n");
+    const jobs = [];
+    for (const it of parseItems(lines)) {
+      if (!it.task || it.parent || !isOpen(it)) continue;
+      const rule = ruleOf(it.raw), ref = refDate(it.raw);
+      if (!rule || !ref || ref >= today) continue;
+      const rep = await rollLine(it.raw.replace(/^[ \t]+/, ""), rule, today, api, p.path);
+      if (rep) jobs.push({ it, rep }); else stuck.push(`${p.name}: ${it.desc} (🔁 ${rule})`);
+    }
+    if (!jobs.length) continue;
+    await editLines(app, p.path, (ls) => {
+      for (const { it, rep } of jobs.reverse()) { // bottom-up, so earlier line numbers stay valid
+        const k = locateRaw(ls, it.raw, it.line);
+        if (k < 0) continue;
+        ls.splice(k, 1, ...rep.lines.map((l) => it.ws + l));
+        missed += rep.missed;
+      }
+    });
+  }
+  return { missed, stuck };
+}
+/** Move finished (done or cancelled) routine occurrences up to week `uptoWeek` into ## Done. Returns how many. */
+function archiveRoutineLines(ls, uptoWeek) {
+  const m = getMoment();
+  const dsec = findSection(ls, DONE_SEC);
+  const inDone = (i) => dsec && i >= dsec.start && i < dsec.end;
+  const take = parseItems(ls).filter((t) => t.task && !t.parent && !inDone(t.line) && (isDone(t) || t.status === "-") && ruleOf(t.raw) && refDate(t.raw)
+    && weekId(m(refDate(t.raw), "YYYY-MM-DD")) <= uptoWeek);
+  const moved = [];
+  for (const t of [...take].reverse()) {
+    const end = blockEnd(ls, t);
+    moved.unshift(...dedent(ls.slice(t.line, end), t.ws).filter((l) => l.trim() !== ""));
+    ls.splice(t.line, end - t.line);
+  }
+  insertIntoSection(ls, DONE_SEC, moved);
+  return take.length;
+}
+const R0 = () => ({ done: 0, missed: 0, upcoming: 0, skipped: 0 });
+const rPct = (a) => (a && a.done + a.missed ? Math.round((100 * a.done) / (a.done + a.missed)) : null);
+function rSum(map, ids) { const out = R0(); for (const id of ids) { const a = map.get(id); if (a) for (const k of Object.keys(out)) out[k] += a[k]; } return out; }
+/** Routines and their occurrences, per routine and per week (the "integral" over all routines). */
+function loadRoutines(d, linesByPath) {
+  const m = getMoment(), today = d.today.format("YYYY-MM-DD");
+  const routines = [], byKey = new Map(), weeks = new Map();
+  for (const p of d.projects) {
+    if (!p.routine) continue;
+    for (const it of parseItems(linesByPath.get(p.path) || [])) {
+      if (!it.task || it.parent) continue;
+      const rule = ruleOf(it.raw);
+      if (!rule) continue;
+      const key = `${p.path}|${it.desc.toLowerCase()}`;
+      let r = byKey.get(key);
+      if (!r) { r = { key, name: it.desc, project: p, rule, freq: freqOf(rule), weeks: new Map(), next: null }; byKey.set(key, r); routines.push(r); }
+      const ref = refDate(it.raw);
+      if (isOpen(it)) { r.rule = rule; r.freq = freqOf(rule); if (ref && (!r.next || ref < r.next)) r.next = ref; }
+      if (!ref) continue;
+      let state = isDone(it) ? "done" : it.status === "-" ? (/\[missed::/i.test(it.raw) ? "missed" : "skipped") : ref < today ? "missed" : "upcoming";
+      if (state === "missed" && isOpen(it) && p.status !== "active") state = "skipped"; // paused project: not held against you
+      const wid = weekId(m(ref, "YYYY-MM-DD"));
+      for (const map of [r.weeks, weeks]) { if (!map.has(wid)) map.set(wid, R0()); map.get(wid)[state]++; }
+    }
+  }
+  const order = { daily: 0, weekly: 1, monthly: 2, yearly: 3, other: 4 };
+  routines.sort((a, b) => a.project.name.localeCompare(b.project.name) || order[a.freq] - order[b.freq] || a.name.localeCompare(b.name));
+  d.routines = routines;
+  d.routineWeeks = weeks;
+}
+/** Mean of the weekly routine % over the last n weeks before `before` that had routine occurrences. */
+function routineAvg(d, before, n, routine = null) {
+  const map = routine ? routine.weeks : d.routineWeeks;
+  const v = [...map.keys()].filter((w) => w < before).sort().map((w) => rPct(map.get(w))).filter((x) => x !== null).slice(-n);
+  return v.length ? Math.round(mean(v)) : null;
+}
+/** Is this path inside a routine project? (for "done outside goals") */
+function routinePathTest(app) {
+  const cfg = getConfig(app), ctx = { cfg, projects: listProjects(app, cfg) };
+  return (path) => { const p = projectOfPath(ctx, path); return !!(p && p.routine); };
+}
+
 async function loadAll(app) {
   const cfg = getConfig(app);
   const m = getMoment();
   const projects = listProjects(app, cfg);
   const byPath = new Map(projects.map((p) => [p.path, p]));
+  const linesByPath = new Map();
   for (const p of projects) {
     const lines = (await app.vault.cachedRead(p.file)).split("\n");
+    linesByPath.set(p.path, lines);
     p.backlog = backlogItems(lines).sort(byPrioDue);
     const ns = findSection(lines, "Notes & ideas");
     p.notes = ns ? parseItems(lines, ns.start, ns.end).filter((i) => !i.parent) : [];
@@ -433,12 +609,14 @@ async function loadAll(app) {
     if (!p) continue;
     const content = await app.vault.cachedRead(f);
     if (!content.includes("[week::") && !content.includes("[from::")) continue;
-    for (const it of parseItems(content.split("\n"))) {
+    const flines = content.split("\n"), us = findSection(flines, UNPLANNED_SEC);
+    for (const it of parseItems(flines)) {
       if (!it.task) continue;
       const wk = weekIds(it.fields.week)[0] || null;
       const from = weekIds(it.fields.from);
       if (!wk && !from.length) continue;
-      const t = { path: f.path, line: it.line, raw: it.raw, body: it.body, text: it.body, status: it.status, fields: it.fields, desc: it.desc, week: wk, from, projectPath: p.path };
+      const t = { path: f.path, line: it.line, raw: it.raw, body: it.body, text: it.body, status: it.status, fields: it.fields, desc: it.desc, week: wk, from, projectPath: p.path,
+        unplannedIn: weekIds(it.fields.unplanned), inUnplanned: !!(us && it.line >= us.start && it.line < us.end) };
       if (wk) bucket(wk, p.path).here.push(t);
       for (const fw of from) if (fw !== wk) bucket(fw, p.path).carried.push(t);
     }
@@ -468,7 +646,9 @@ async function loadAll(app) {
     inbox.open = items.length;
     inbox.classified = items.filter((i) => i.fields.to).length;
   }
-  return computeStats({ app, cfg, projects, byPath, weeks, sel, inbox, today: m(), curId: weekId(m()) });
+  const d = computeStats({ app, cfg, projects, byPath, weeks, sel, inbox, today: m(), curId: weekId(m()) });
+  loadRoutines(d, linesByPath);
+  return d;
 }
 
 /** Attach each week's picked tasks to the goal of their project (or to w.extra when the project has no goal). */
@@ -513,6 +693,22 @@ function computeStats(d) {
     };
   }
   d.weekMap = new Map(d.weeks.map((w) => [w.id, w]));
+  // Planned vs unplanned (Add tasks): every task picked for a week, per project; dropped ones don't count.
+  d.mix = new Map();
+  for (const [wid, m2] of d.sel) {
+    const pm = new Map();
+    for (const [pp, b] of m2) {
+      const a = { planned: 0, unplanned: 0, plannedDone: 0, unplannedDone: 0 };
+      for (const t of b.here) { if (t.status === "-") continue; const k = isUnplannedIn(t, wid) ? "unplanned" : "planned"; a[k]++; if (isDone(t)) a[k + "Done"]++; }
+      for (const t of b.carried) a[isUnplannedIn(t, wid) ? "unplanned" : "planned"]++; // planned that week, moved on: not done
+      pm.set(pp, a);
+    }
+    d.mix.set(wid, pm);
+  }
+  for (const w of d.weeks) {
+    const a = mixSum(d, [w.id]);
+    w.m.unplanned = a.unplanned; w.m.unplannedDone = a.unplannedDone; w.m.plannedOnly = a.planned;
+  }
   for (const p of d.projects) p.history = [];
   for (const w of d.weeks) for (const g of w.goals) {
     const p = d.byPath.get(g.projectPath);
@@ -1075,9 +1271,11 @@ async function cmdRegister(env) {
   env.notice(`Registered ${added} project(s); ${seen} already set up or ignored${upgraded ? `; added the “${PLANNED_SEC}” section to ${upgraded} existing project note(s)` : ""}. Add a one-line description to each — it makes the inbox classifier much better.`, 10000);
 }
 async function upgradeProjectNote(app, file) {
-  const probe = (await app.vault.read(file)).split("\n");
-  if (!(ensureProjectBlock(probe) | ensureProjectSections(probe))) return false; // already fine — don't touch the file
-  await editLines(app, file.path, (ls) => { ensureProjectBlock(ls); ensureProjectSections(ls); });
+  // routine projects only get the dashboard — their tasks live in sections of your choice (e.g. ## Daily / ## Weekly)
+  const routine = String(app.metadataCache.getFileCache(file)?.frontmatter?.kind || "").toLowerCase() === "routine";
+  const fix = (ls) => ensureProjectBlock(ls) | (routine ? false : ensureProjectSections(ls));
+  if (!fix((await app.vault.read(file)).split("\n"))) return false; // already fine — don't touch the file
+  await editLines(app, file.path, (ls) => { fix(ls); });
   return true;
 }
 /** Put the project dashboard right under the note's title (or after the properties). Returns true if added. */
@@ -1181,35 +1379,40 @@ async function askScheduled(env, target, line) {
   return setDate(line, "scheduled", v || null);
 }
 const planLine = (line, wid) => setField(line, "week", wid);
-async function addPlanned(app, projectPath, lines) {
-  if (lines.length) await editLines(app, projectPath, (ls) => insertIntoProjectSection(ls, PLANNED_SEC, lines));
+async function addPlanned(app, projectPath, lines) { return addToSection(app, projectPath, PLANNED_SEC, lines); }
+async function addToSection(app, projectPath, section, lines) {
+  if (lines.length) await editLines(app, projectPath, (ls) => insertIntoProjectSection(ls, section, lines));
 }
 /** Pick tasks for a week from one project: they move from ## Backlog to ## Planned with [week:: target]. Returns how many. */
-async function pickTasks(env, project, header, target) {
+/** Pick tasks for a week. unplanned: Add tasks during the week → ## Unplanned with [unplanned:: <week>], no tidy-up first. */
+async function pickTasks(env, project, header, target, { unplanned = false } = {}) {
   const { app } = env, cfg = getConfig(app);
   const today = env.moment().format("YYYY-MM-DD");
-  await tidyPlanned(env, project);
+  if (!unplanned) await tidyPlanned(env, project);
+  // [unplanned:: 2026-W46] = the week(s) it was added outside the plan; kept as history when it moves on later
+  const mark = (line) => (unplanned ? setField(planLine(line, target), "unplanned", addFrom(parseFields(line).unplanned, target)) : planLine(line, target));
+  const add = (lines) => (unplanned ? addToSection(app, project.path, UNPLANNED_SEC, lines) : addPlanned(app, project.path, lines));
   const lines0 = (await readPath(app, project.path)).split("\n");
   const already = parseItems(lines0).filter((t) => t.task && isOpen(t) && weekIds(t.fields.week)[0] === target).length;
   const remaining = backlogItems(lines0).sort(byPrioDue);
   let added = 0;
   for (;;) {
-    const opts = [[`✔ Done — ${already + added} task(s) planned for ${shortWeek(target)}`, "done"], ["＋ Type new task(s)…", "new"],
+    const opts = [[unplanned ? `✔ Done — ${added} task(s) added to ${shortWeek(target)} (unplanned)` : `✔ Done — ${already + added} task(s) planned for ${shortWeek(target)}`, "done"], ["＋ Type new task(s)…", "new"],
       ...remaining.map((t) => [taskLabel(t), t])];
     const c = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), header);
     if (c === null || c === undefined || c === "done") break;
     if (c === "new") {
       const txt = await env.prompt("New task(s) — one per line (Tasks dates like 📅 2026-11-20 are fine)", "", true);
       if (txt) for (const t of txt.split(/\r?\n/).map((x) => x.trim().replace(/^[-*]\s+(\[.\]\s+)?/, "")).filter(Boolean)) {
-        await addPlanned(app, project.path, [planLine(await askSchedule(env, cfg, target, newTask(cfg, `- [ ] ${t}`, today)), target)]);
+        await add([mark(await askSchedule(env, cfg, target, newTask(cfg, `- [ ] ${t}`, today)))]);
         added++;
       }
       continue;
     }
     const block = await takeBacklogItem(app, project.path, c.raw);
     if (block) {
-      block[0] = planLine(await askSchedule(env, cfg, target, block[0]), target);
-      await addPlanned(app, project.path, block);
+      block[0] = mark(await askSchedule(env, cfg, target, block[0]));
+      await add(block);
       added++;
     }
     remaining.splice(remaining.indexOf(c), 1);
@@ -1220,11 +1423,13 @@ async function pickTasks(env, project, header, target) {
 /** Plan one project: choose this or next week, optionally set its goal, pick tasks. */
 async function cmdPlanProject(env) {
   const { app } = env, cfg = getConfig(app);
+  await rollRoutinesNotice(env);
   const data = await loadAll(app);
   const af = app.workspace && app.workspace.getActiveFile ? app.workspace.getActiveFile() : null;
   let p = af ? data.byPath.get(af.path) || projectOfPath(data, af.path) : null;
+  if (p && p.routine) p = null; // routines repeat by themselves — nothing to plan
   if (!p) {
-    const list = data.projects.filter((x) => !["done", "archived", "dropped"].includes(x.status));
+    const list = data.projects.filter((x) => !x.routine && !["done", "archived", "dropped"].includes(x.status));
     if (!list.length) throw new Error("no projects yet — run Register projects first");
     p = await ask(env, list.map((x) => `${x.name}${x.status !== "active" ? ` (${x.status})` : ""}`), list, "Plan tasks for which project?");
   }
@@ -1243,8 +1448,35 @@ async function cmdPlanProject(env) {
   env.notice(`${p.name}: ${n} task(s) planned for ${target}. They're in the project's “${PLANNED_SEC}” section and in the ${shortWeek(target)} week note.`, 7000);
 }
 
+/** Cancel missed routine occurrences; tell the user about it and about rules that couldn't be rolled. */
+async function rollRoutinesNotice(env) {
+  const r = await rollRoutines(env.app, env.moment().format("YYYY-MM-DD"));
+  if (r.missed) env.notice(`Routines: ${r.missed} missed occurrence(s) marked as missed (cancelled); the next ones are scheduled.`, 6000);
+  if (r.stuck.length) env.notice(`Routines: couldn't work out the next date for ${r.stuck.join("; ")}. Enable the Tasks plugin or use a simpler 🔁 rule.`, 10000);
+  return r;
+}
+
+/** Add tasks to a project during the current week: like Plan project, but they go to ## Unplanned and nothing is tidied. */
+async function cmdAddTasks(env) {
+  const { app } = env;
+  const data = await loadAll(app);
+  const af = app.workspace && app.workspace.getActiveFile ? app.workspace.getActiveFile() : null;
+  let p = af ? data.byPath.get(af.path) || projectOfPath(data, af.path) : null;
+  if (p && p.routine) p = null;
+  if (!p) {
+    const list = data.projects.filter((x) => !x.routine && !["done", "archived", "dropped"].includes(x.status));
+    if (!list.length) throw new Error("no projects yet — run Register projects first");
+    p = await ask(env, list.map((x) => `${x.name}${x.status !== "active" ? ` (${x.status})` : ""}`), list, "Add unplanned tasks to which project?");
+  }
+  const cur = data.curId;
+  await ensureWeek(app, data.cfg, cur);
+  const n = await pickTasks(env, p, `${p.name} · add unplanned tasks to ${shortWeek(cur)}`, cur, { unplanned: true });
+  if (n) env.notice(`${p.name}: ${n} unplanned task(s) added to ${cur}. They're in the project's “${UNPLANNED_SEC}” section and count like planned ones; Analytics shows the planned/unplanned split.`, 7000);
+}
+
 async function cmdPlan(env, forcedId) {
   const { app } = env, cfg = getConfig(app);
+  await rollRoutinesNotice(env);
   const now = env.moment();
   const cur = weekId(now), next = shiftWeek(cur, 1);
   let target = forcedId;
@@ -1272,7 +1504,7 @@ async function cmdPlan(env, forcedId) {
     const n = week.goals.length;
     const picked = data.sel.get(target) || new Map();
     const pickedOpen = (pp) => (picked.get(pp) ? picked.get(pp).here.filter(isOpen).length : 0);
-    const active = data.projects.filter((p) => p.status === "active");
+    const active = data.projects.filter((p) => p.status === "active" && !p.routine); // routines are always in focus, no goal needed
     const noGoal = data.projects.filter((p) => !goalByProject.has(p.path) && pickedOpen(p.path));
     const fresh = active.filter((p) => !goalByProject.has(p.path) && !pickedOpen(p.path))
       .sort((a, b) => (b.weeksSince ?? 999) - (a.weeksSince ?? 999) || a.name.localeCompare(b.name));
@@ -1301,7 +1533,7 @@ async function cmdPlan(env, forcedId) {
     }
     let p = c.p;
     if (c.a === "activate") {
-      const back = data.projects.filter((x) => x.status === "backlog");
+      const back = data.projects.filter((x) => x.status === "backlog" && !x.routine);
       if (!back.length) { env.notice("No backlog projects"); continue; }
       p = await env.suggest(back.map((x) => x.name), back, "Activate which project?");
       if (!p) continue;
@@ -1344,32 +1576,52 @@ async function applyTaskAction(app, tasks, action, id, nextId) {
       if (action === "drop") { ls[k] = setStatus(ls[k], "-"); n++; return; }
       let line = setField(ls[k], "from", addFrom(t.fields.from, id));
       line = setDate(line, "scheduled", null);
-      if (action === "carry") { ls[k] = setField(line, "week", nextId); n++; return; }
-      // return to backlog: move the task (and its sub-items) out of ## Planned
+      const inUnpl = !!t.inUnplanned;
+      if (action === "carry" && !inUnpl) { ls[k] = setField(line, "week", nextId); n++; return; }
+      // return to backlog (or carry out of ## Unplanned): move the task and its sub-items
       const it = parseItems(ls, k, k + 1)[0];
       const end = blockEnd(ls, it);
       const block = dedent(ls.slice(k, end), it.ws).filter((l) => l.trim() !== "");
-      block[0] = setField(line.replace(/^[ \t]+/, ""), "week", null);
+      let fresh = line.replace(/^[ \t]+/, "");
+      if (inUnpl && !weekIds(t.fields.unplanned).length) fresh = setField(fresh, "unplanned", id); // keep the history
       ls.splice(k, end - k);
-      insertIntoProjectSection(ls, "Backlog", block);
+      if (action === "carry") { // an unplanned task carried over is planned now: next week, ## Planned
+        block[0] = setField(fresh, "week", nextId);
+        insertIntoProjectSection(ls, PLANNED_SEC, block);
+      } else {
+        block[0] = setField(fresh, "week", null);
+        insertIntoProjectSection(ls, "Backlog", block);
+      }
       n++;
     });
   }
   return n;
 }
+/** Was task t added outside the plan in week wid? (marker, or written in ## Unplanned for that week) */
+function isUnplannedIn(t, wid) { return (t.unplannedIn || []).includes(wid) || (!!t.inUnplanned && t.week === wid && !(t.unplannedIn || []).length); }
+function mixSum(d, ids, pp = null) {
+  const a = { planned: 0, unplanned: 0, plannedDone: 0, unplannedDone: 0 };
+  for (const id of ids) {
+    const pm = d.mix.get(id);
+    if (!pm) continue;
+    for (const [k, x] of pm) if (!pp || k === pp) for (const f of Object.keys(a)) a[f] += x[f];
+  }
+  return a;
+}
+const unplPct = (a) => (a.planned + a.unplanned ? Math.round((100 * a.unplanned) / (a.planned + a.unplanned)) : null);
 /** Move finished tasks of week `id` from ## Planned to ## Done in each project's root note. */
 async function archiveDone(app, d, id) {
   let n = 0;
   for (const p of d.projects) {
     const content = await app.vault.read(p.file);
     if (!content.includes(`[week:: ${id}]`)) continue;
-    await editLines(app, p.path, (ls) => { n += moveDoneOut(ls, (t) => weekIds(t.fields.week)[0] === id); });
+    await editLines(app, p.path, (ls) => { for (const sec of [PLANNED_SEC, UNPLANNED_SEC]) n += moveDoneOut(ls, (t) => weekIds(t.fields.week)[0] === id, sec); });
   }
   return n;
 }
 /** Move finished top-level tasks (with their sub-items) from ## Planned to ## Done. `keep(t)` filters which. Returns how many. */
-function moveDoneOut(ls, keep = () => true) {
-  const sec = findSection(ls, PLANNED_SEC);
+function moveDoneOut(ls, keep = () => true, section = PLANNED_SEC) {
+  const sec = findSection(ls, section);
   if (!sec) return 0;
   const done = parseItems(ls, sec.start, sec.end).filter((t) => t.task && !t.parent && isDone(t) && keep(t));
   const moved = [];
@@ -1426,6 +1678,7 @@ async function tidyPlanned(env, project) {
 
 async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
   const { app } = env, cfg = getConfig(app);
+  await rollRoutinesNotice(env);
   const curId = weekId(env.moment());
   let d = await loadAll(app);
   let id = forcedId;
@@ -1503,6 +1756,12 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
     await applyTaskAction(app, open, action, id, nextId);
   }
   const archived = await archiveDone(app, await loadAll(app), id);
+  // Routines: the week's result (before archiving, the counts are the same either way) and tidy-up.
+  const rd = await loadAll(app);
+  const rw = rd.routineWeeks.get(id), rp = rPct(rw);
+  const rLine = rw && rp !== null ? `${rp}% (${rw.done}/${rw.done + rw.missed} done, ${rw.missed} missed)` : null;
+  let rArchived = 0;
+  for (const p of rd.projects.filter((x) => x.routine)) await editLines(app, p.path, (ls) => { rArchived += archiveRoutineLines(ls, id); });
 
   const wins = oneLine(await env.prompt("Wins — what moved forward? (optional)", "", true));
   const lessons = oneLine(await env.prompt("What got in the way / what will you change? (optional)", "", true));
@@ -1511,6 +1770,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
   if (wins) fields.push(`- Wins:: ${wins}`);
   if (lessons) fields.push(`- Lessons:: ${lessons}`);
   if (energy) fields.push(`- Energy:: ${energy}`);
+  if (rLine) fields.push(`- Routines:: ${rLine}`);
 
   const canSummarize = !env.isMobile || String(cfg.llm_mobile).toLowerCase() === "url";
   const wantAi = canSummarize ? await env.suggest(["Write a short AI summary with the local model", "No summary"], [true, false], "Summary") : false;
@@ -1518,7 +1778,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
     try {
       const w = (await loadAll(app)).weekMap.get(id);
       const facts = w.goals.map((g) => `- ${g.projectName}: "${g.text}" → ${g.score}%${g.fields.miss ? ` (reason: ${g.fields.miss})` : ""}; tasks done ${g.doneCount}/${g.counted.length}`).join("\n");
-      const msg = `Here is my week ${id}:\n${facts}\nWins: ${wins || "-"}\nObstacles: ${lessons || "-"}\nEnergy (1-5): ${energy || "-"}\n\nWrite 2–3 plain sentences: what the week was really about, the pattern behind what slipped, and one concrete adjustment for next week. Be direct, no praise, no bullet points.`;
+      const msg = `Here is my week ${id}:\n${facts}${rLine ? `\nRoutines: ${rLine}` : ""}\nWins: ${wins || "-"}\nObstacles: ${lessons || "-"}\nEnergy (1-5): ${energy || "-"}\n\nWrite 2–3 plain sentences: what the week was really about, the pattern behind what slipped, and one concrete adjustment for next week. Be direct, no praise, no bullet points.`;
       const sm = oneLine(await llmChat(env, cfg, [{ role: "user", content: msg }]));
       if (sm) fields.push(`- Summary:: ${sm}`);
     } catch (e) { env.notice(`AI summary skipped — ${e.message}`, 8000); }
@@ -1527,7 +1787,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
   const wf = app.vault.getAbstractFileByPath(wp);
   await app.fileManager.processFrontMatter(wf, (f) => { f.status = "reviewed"; f.reviewed = env.moment().format("YYYY-MM-DD"); });
   const final = (await loadAll(app)).weekMap.get(id).goals;
-  env.notice(`${id} reviewed: ${final.filter((g) => g.score >= 100).length}/${final.length} goals achieved, average ${Math.round(mean(final.map((g) => g.score)) || 0)}%${archived ? ` · ${archived} finished task(s) moved to “${DONE_SEC}”` : ""}`, 8000);
+  env.notice(`${id} reviewed: ${final.filter((g) => g.score >= 100).length}/${final.length} goals achieved, average ${Math.round(mean(final.map((g) => g.score)) || 0)}%${rLine ? ` · routines ${rLine}` : ""}${archived + rArchived ? ` · ${archived + rArchived} finished task(s) moved to “${DONE_SEC}”` : ""}`, 8000);
   if (thenPlan && nextId >= curId) {
     const go = await env.suggest([`Plan ${nextId} now`, "Later"], [true, false], "Next");
     if (go) await cmdPlan(env, nextId);
@@ -1597,9 +1857,12 @@ function classifyTasks(d, tasks) {
       item.group = "Inbox";
     } else {
       proj = projectOfPath(d, t.path);
-      inFocus = !!(proj && fset.has(proj.path));
+      if (proj && proj.routine && proj.status !== "active") continue; // paused routines: not shown
+      inFocus = !!(proj && (proj.routine || fset.has(proj.path)));   // routines are always in focus
     }
     item.project = proj;
+    item.routine = !!(proj && proj.routine);
+    if (item.routine) item.freq = freqOf(ruleOf(text));
     item.group = item.group || (proj ? proj.name : t.path.split("/").pop().replace(/\.md$/, ""));
     if (item.start && item.start > today) continue; // not startable yet
     // Both dates count: a task is "today" if it's scheduled OR due today (or earlier),
@@ -1622,8 +1885,13 @@ function classifyTasks(d, tasks) {
     PRIO_RANK[a.prio] - PRIO_RANK[b.prio] ||
     String(a.scheduled || "9").localeCompare(String(b.scheduled || "9")) ||
     a.desc.localeCompare(b.desc);
-  const byDayThenDeadline = (a, b) => String(a.when).localeCompare(String(b.when)) || byDeadline(a, b);
+  // Routines rank below project work, unless they have a deadline (📅) or a high priority (⏫ / 🔺).
+  const lowRoutine = (t) => t.routine && !t.due && t.prio !== "high" && t.prio !== "highest";
+  const byDayThenDeadline = (a, b) => String(a.when).localeCompare(String(b.when)) || (lowRoutine(a) - lowRoutine(b)) || byDeadline(a, b);
   out.today.sort(byDeadline); out.later.sort(byDayThenDeadline); out.anytime.sort(byDeadline); out.outside.sort(byDeadline);
+  out.routines = out.today.filter(lowRoutine);            // shown as a compact list under Today
+  out.today = out.today.filter((t) => !lowRoutine(t));
+  out.later = out.later.filter((t) => !(lowRoutine(t) && t.freq === "daily")); // daily ones would repeat every day
   return out;
 }
 function toTaskItem(d, t) {
@@ -1658,10 +1926,16 @@ function renderTaskWidgets(d, tasks) {
   const focusNames = [...c.focus].map((p) => d.byPath.get(p)?.name).filter(Boolean);
   const nextNames = [...c.upcomingFocus].filter((p) => !c.focus.has(p)).map((p) => d.byPath.get(p)?.name).filter(Boolean);
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Focus tasks</span><span class="pt-muted">${esc(focusNames.join(" · "))}${nextNames.length ? ` <span class="pt-next">+ next week: ${esc(nextNames.join(" · "))}</span>` : ""}</span></div>`;
-  if (!c.hasPlan && !c.today.length && !c.later.length) h += `<div class="pt-empty">No plan for this week — only tasks outside focus are shown below.</div>`;
+  if (!c.hasPlan && !c.today.length && !c.later.length && !c.routines.length) h += `<div class="pt-empty">No plan for this week — only tasks outside focus are shown below.</div>`;
   else {
     h += `<div class="pt-sub">Today${c.today.length ? ` <span class="pt-count">${c.today.length}</span>` : ""}</div>`;
     h += c.today.length ? c.today.map((t) => taskRow(d, t)).join("") : `<div class="pt-empty">Nothing scheduled or due today.</div>`;
+    if (d.routines.some((r) => r.project.status === "active")) {
+      const rw = d.routineWeeks.get(d.curId), rp = rPct(rw), avg = routineAvg(d, d.curId, 4);
+      const multi = new Set(c.routines.map((t) => t.project.path)).size > 1;
+      h += `<div class="pt-sub">Routines today${c.routines.length ? ` <span class="pt-count">${c.routines.length}</span>` : ""} <span class="pt-muted">· this week ${rw && rw.done + rw.missed ? `${rw.done}/${rw.done + rw.missed} · ${rp}%` : "–"}${avg !== null ? ` · 4-wk avg ${avg}%` : ""}</span></div>`;
+      h += c.routines.length ? `<div class="pt-routines">${c.routines.map((t) => taskRow(d, t, { showProject: multi })).join("")}</div>` : `<div class="pt-empty">No routines left for today.</div>`;
+    }
     if (c.later.length) {
       let day = null;
       h += `<div class="pt-sub">Next ${c.days} days${c.planned.length ? ` <span class="pt-muted">· this week + ${c.planned.map(shortWeek).join(", ")} focus</span>` : ""}</div>`;
@@ -1709,6 +1983,13 @@ function delta(cur, base, unit = "") {
   if (!d) return `<span class="pt-flat">= 4-wk avg</span>`;
   return `<span class="${d > 0 ? "pt-up" : "pt-down"}">${d > 0 ? "▲" : "▼"} ${Math.abs(d)}${unit} vs 4-wk avg</span>`;
 }
+/** "80% / 20%" planned vs unplanned, with the counts on hover. */
+function mixCell(a) {
+  const tot = a.planned + a.unplanned;
+  if (!tot) return `<td class="pt-num"><span class="pt-muted">–</span></td>`;
+  const u = unplPct(a);
+  return `<td class="pt-num" title="${a.planned} planned (${a.plannedDone} done) · ${a.unplanned} unplanned (${a.unplannedDone} done)">${100 - u}% / ${u}%</td>`;
+}
 const reasonLabel = (k) => (MISS_REASONS.find((r) => r[0] === k) || [k, k])[1];
 
 function goalRows(d, w, { showProject = true, compact = false } = {}) {
@@ -1726,16 +2007,20 @@ function goalRows(d, w, { showProject = true, compact = false } = {}) {
 }
 
 function chartScores(d, ids) {
+  return chartPct(d, ids, ids.map((id) => d.weekMap.get(id)?.m.avg ?? null),
+    (id, v) => `${id}: ${v}% avg, ${d.weekMap.get(id).m.achieved}/${d.weekMap.get(id).m.goals} achieved`, "Average goal score per week");
+}
+/** Bar per week (0–100 %) with a 4-week trend line. */
+function chartPct(d, ids, vals, titleOf, label) {
   const W = 640, H = 170, L = 30, R = 8, T = 10, B = 24, n = ids.length;
   const cw = (W - L - R) / n, bw = Math.min(28, cw * 0.62);
   const y = (v) => T + (H - T - B) * (1 - v / 100);
-  let s = `<svg class="pt-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Average goal score per week">`;
+  let s = `<svg class="pt-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">`;
   for (const v of [0, 50, 100]) s += `<line class="pt-grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="pt-axis" x="${L - 6}" y="${y(v) + 3.5}" text-anchor="end">${v}</text>`;
   const pts = [];
-  const vals = ids.map((id) => d.weekMap.get(id)?.m.avg ?? null);
   ids.forEach((id, i) => {
     const v = vals[i], x = L + cw * i + cw / 2;
-    if (v !== null) s += `<rect class="pt-bar-${scoreCls(v)}" x="${x - bw / 2}" y="${y(v)}" width="${bw}" height="${Math.max(0, y(0) - y(v))}" rx="3"><title>${id}: ${v}% avg, ${d.weekMap.get(id).m.achieved}/${d.weekMap.get(id).m.goals} achieved</title></rect>`;
+    if (v !== null) s += `<rect class="pt-bar-${scoreCls(v)}" x="${x - bw / 2}" y="${y(v)}" width="${bw}" height="${Math.max(0, y(0) - y(v))}" rx="3"><title>${esc(titleOf(id, v))}</title></rect>`;
     else s += `<circle class="pt-gap" cx="${x}" cy="${y(0) - 3}" r="2"/>`;
     const win = vals.slice(Math.max(0, i - 3), i + 1).filter((x) => x !== null);
     if (win.length && v !== null) pts.push([x, y(mean(win))]);
@@ -1776,14 +2061,14 @@ function baseline(d, before, key) {
   return ws.length ? mean(ws.map((w) => (key === "rate" ? (100 * w.m.achieved) / w.m.goals : w.m[key]))) : null;
 }
 function neglected(d) {
-  return d.projects.filter((p) => p.status === "active" && !d.weekMap.get(d.curId)?.goals.some((g) => g.projectPath === p.path) && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks))
+  return d.projects.filter((p) => p.status === "active" && !p.routine && !d.weekMap.get(d.curId)?.goals.some((g) => g.projectPath === p.path) && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks))
     .sort((a, b) => (b.weeksSince ?? 999) - (a.weeksSince ?? 999));
 }
 
 function renderHome(d, opts = {}) {
   const w = d.weekMap.get(d.curId);
   let h = `<div class="pt">`;
-  h += buttons([["Capture", "Capture"], ["Process inbox", "Process inbox"], ["Plan week", "Plan week", true], ["Weekly review", "Weekly review"], ["New project", "New project"]]);
+  h += buttons([["Capture", "Capture"], ["Process inbox", "Process inbox"], ["Plan week", "Plan week", true], ["Add tasks", "Add tasks"], ["Weekly review", "Weekly review"], ["New project", "New project"]]);
   const daysLeft = 7 - d.today.isoWeekday();
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">This week</span><span class="pt-muted">${w ? link(w.path, `${d.curId} · ${weekRange(d.curId)}`) : `${d.curId} · ${weekRange(d.curId)}`}</span></div>`;
   if (w && w.goals.length) {
@@ -1803,8 +2088,9 @@ function renderHome(d, opts = {}) {
   for (const p of neglected(d).slice(0, 5)) att.push(`${link(p.path, p.name)} <span class="pt-muted">${p.weeksSince === null ? "never focused" : `${p.weeksSince}w without focus`}</span>`);
   h += `<div class="pt-card"><div class="pt-h">Needs attention</div>${att.length ? `<ul class="pt-list">${att.map((a) => `<li>${a}</li>`).join("")}</ul>` : `<div class="pt-muted">Nothing — nice.</div>`}</div>`;
   h += `</div>`;
-  const act = d.projects.filter((p) => p.status === "active").length, back = d.projects.filter((p) => p.status === "backlog").length;
-  h += `<div class="pt-foot pt-muted">${act} active · ${back} backlog projects · ${link("Tracker/Analytics.md", "Analytics →")}</div>`;
+  const act = d.projects.filter((p) => p.status === "active" && !p.routine).length, back = d.projects.filter((p) => p.status === "backlog" && !p.routine).length;
+  const nr = d.routines.filter((r) => r.project.status === "active").length;
+  h += `<div class="pt-foot pt-muted">${act} active · ${back} backlog projects${nr ? ` · ${nr} routines` : ""} · ${link("Tracker/Analytics.md", "Analytics →")}</div>`;
   return h + `</div>`;
 }
 
@@ -1816,13 +2102,77 @@ function renderWeek(d, path, opts = {}) {
   const state = w.status === "reviewed" ? "reviewed" : past ? "awaiting review" : isCur ? (daysLeft ? `${daysLeft} day${daysLeft > 1 ? "s" : ""} left` : "review tonight") : "upcoming";
   let h = `<div class="pt">`;
   const outside = opts.completions ? opts.completions[w.id] || 0 : null;
-  h += `<div class="pt-kpis">${kpi("Goals achieved", `${w.m.achieved}<span class="pt-of">/${w.m.goals}</span>`)}${kpi("Avg goal progress", w.m.avg === null ? "–" : `${w.m.avg}%`)}${kpi("Tasks done", `${w.m.done}<span class="pt-of">/${w.m.planned}</span>`)}${outside === null ? "" : kpi("Done outside goals", outside, "✅ elsewhere in the vault")}${kpi("Status", esc(state))}</div>`;
+  h += `<div class="pt-kpis">${kpi("Goals achieved", `${w.m.achieved}<span class="pt-of">/${w.m.goals}</span>`)}${kpi("Avg goal progress", w.m.avg === null ? "–" : `${w.m.avg}%`)}${kpi("Tasks done", `${w.m.done}<span class="pt-of">/${w.m.planned}</span>`)}${outside === null ? "" : kpi("Done outside goals", outside, "✅ elsewhere in the vault")}${mixKpi("Unplanned tasks", mixSum(d, [w.id]))}${routineKpi(d, w.id)}${kpi("Status", esc(state))}</div>`;
   const btn = [];
   if (w.status !== "reviewed" && (isCur || past)) btn.push(["Weekly review", "Weekly review", true]);
   if (!past) btn.push(["Plan / add goals", "Plan week"], ["Plan a project", "Plan project"]);
+  if (isCur) btn.push(["Add tasks (unplanned)", "Add tasks"]);
   if (btn.length) h += buttons(btn);
   h += weekTaskList(d, w);
+  h += routineWeekCard(d, w.id);
   return h + `</div>`;
+}
+function mixKpi(label, a) {
+  const tot = a.planned + a.unplanned;
+  if (!tot) return "";
+  return kpi(label, `${a.unplanned}<span class="pt-of">/${tot} · ${unplPct(a)}%</span>`, `${a.planned} planned · ${a.unplanned} added during the week`);
+}
+function routineKpi(d, wid) {
+  const a = d.routineWeeks.get(wid);
+  if (!a || !(a.done + a.missed + a.upcoming)) return "";
+  const p = rPct(a);
+  return kpi("Routines", p === null ? "–" : `${p}%`, `${a.done}/${a.done + a.missed} done${a.upcoming ? ` · ${a.upcoming} to go` : ""}`);
+}
+const pctCell = (a) => { const p = rPct(a); return p === null ? `<span class="pt-muted">–</span>` : `<span class="pt-dot pt-${scoreCls(p)}"></span>${p}%`; };
+const pctTitle = (a) => (a ? `${a.done} done · ${a.missed} missed${a.upcoming ? ` · ${a.upcoming} to go` : ""}${a.skipped ? ` · ${a.skipped} skipped` : ""}` : "no occurrences");
+/** This week's routines: integral % plus one row per routine. */
+function routineWeekCard(d, wid) {
+  const rows = d.routines.filter((r) => r.weeks.has(wid));
+  if (!rows.length) return "";
+  const a = d.routineWeeks.get(wid);
+  const multi = new Set(rows.map((r) => r.project.path)).size > 1;
+  let h = `<div class="pt-card pt-wgroup"><div class="pt-goal-head"><span class="pt-proj">🔁 Routines</span><span class="pt-goal-text pt-muted">${esc(pctTitle(a))}</span></div>`;
+  h += `<div class="pt-goal-bar">${bar(rPct(a))}<span class="pt-goal-num">${rPct(a) === null ? "–" : rPct(a) + "%"}</span><span class="pt-goal-tasks">${a.done}/${a.done + a.missed} done</span></div>`;
+  h += `<table class="pt-table"><thead><tr><th>Routine</th><th>Repeats</th><th class="pt-num">Done</th><th class="pt-num">Missed</th><th class="pt-num">To go</th><th class="pt-num">%</th></tr></thead><tbody>`;
+  for (const r of rows) {
+    const x = r.weeks.get(wid);
+    h += `<tr><td>${link(r.project.path, r.name)}${multi ? ` <span class="pt-muted">${esc(r.project.scope || r.project.name)}</span>` : ""}</td><td class="pt-muted">${esc(r.rule)}</td>`
+      + `<td class="pt-num">${x.done}</td><td class="pt-num${x.missed ? " pt-late" : ""}">${x.missed}</td><td class="pt-num">${x.upcoming}</td><td class="pt-num" title="${esc(pctTitle(x))}">${pctCell(x)}</td></tr>`;
+  }
+  return h + `</tbody></table></div>`;
+}
+/** Analytics: routine completion per week (integral), the separate routine average, and per-routine rates. */
+function routineAnalytics(d, ids, routines = d.routines, title = "Routines") {
+  if (!routines.length) return "";
+  const weeksOf = (wid) => { // integral over the given routines for one week
+    const out = R0();
+    for (const r of routines) { const a = r.weeks.get(wid); if (a) for (const k of Object.keys(out)) out[k] += a[k]; }
+    return out;
+  };
+  const map = new Map(ids.map((id) => [id, weeksOf(id)]));
+  const lastId = shiftWeek(d.curId, -1), last = weeksOf(lastId), cur = weeksOf(d.curId);
+  const closed = ids.filter((id) => id < d.curId);
+  const avgOf = (before, n) => { const v = closed.filter((id) => id < before).map((id) => rPct(map.get(id))).filter((x) => x !== null).slice(-n); return v.length ? Math.round(mean(v)) : null; };
+  const span = rSum(map, closed);
+  let h = `<div class="pt-h">${esc(title)}</div><div class="pt-kpis">`;
+  h += kpi("Last week", rPct(last) === null ? "–" : `${rPct(last)}%`, `${last.done}/${last.done + last.missed} done ${delta(rPct(last), avgOf(lastId, 4), " pts")}`);
+  h += kpi("Routine avg · 4 wks", avgOf(d.curId, 4) === null ? "–" : `${avgOf(d.curId, 4)}%`, "mean of weekly %");
+  h += kpi(`Routine avg · ${closed.length} wks`, avgOf(d.curId, closed.length) === null ? "–" : `${avgOf(d.curId, closed.length)}%`, `${span.done}/${span.done + span.missed} done · ${span.missed} missed`);
+  h += kpi("This week so far", rPct(cur) === null ? "–" : `${rPct(cur)}%`, `${cur.done}/${cur.done + cur.missed} done${cur.upcoming ? ` · ${cur.upcoming} to go` : ""}`);
+  h += `</div>`;
+  h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Routine completion per week</span><span class="pt-legend"><i class="pt-lg-bar"></i>done ÷ (done + missed) <i class="pt-lg-line"></i>4-week trend</span></div>`
+    + chartPct(d, ids, ids.map((id) => rPct(map.get(id))), (id, v) => `${id}: ${v}% · ${pctTitle(map.get(id))}`, "Routine completion per week") + `</div>`;
+  const multi = new Set(routines.map((r) => r.project.path)).size > 1;
+  h += `<div class="pt-card"><div class="pt-h">Per routine</div><div class="pt-heat-wrap"><table class="pt-table"><thead><tr><th>Routine</th><th>Repeats</th><th class="pt-num">This week</th><th class="pt-num">Last week</th><th class="pt-num">4-wk avg</th><th class="pt-num">${closed.length} wks</th><th class="pt-num">Missed</th></tr></thead><tbody>`;
+  for (const r of routines) {
+    const cw = r.weeks.get(d.curId), lw = r.weeks.get(lastId), all = rSum(r.weeks, closed);
+    const a4 = routineAvg(d, d.curId, 4, r);
+    h += `<tr><td>${link(r.project.path, r.name)}${multi ? ` <span class="pt-muted">${esc(r.project.scope || r.project.name)}</span>` : ""}${r.project.status !== "active" ? ` <span class="pt-muted">paused</span>` : ""}</td><td class="pt-muted">${esc(r.rule)}</td>`
+      + `<td class="pt-num" title="${esc(pctTitle(cw))}">${pctCell(cw)}</td><td class="pt-num" title="${esc(pctTitle(lw))}">${pctCell(lw)}</td>`
+      + `<td class="pt-num">${a4 === null ? `<span class="pt-muted">–</span>` : `<span class="pt-dot pt-${scoreCls(a4)}"></span>${a4}%`}</td>`
+      + `<td class="pt-num" title="${esc(pctTitle(all))}">${pctCell(all)}</td><td class="pt-num${all.missed ? " pt-late" : ""}">${all.missed}</td></tr>`;
+  }
+  return h + `</tbody></table></div></div>`;
 }
 /** All tasks picked for the week, grouped by goal (project), with live progress. Tick / edit right here. */
 function weekTaskList(d, w) {
@@ -1856,9 +2206,18 @@ function renderProject(d, path) {
   const p = d.byPath.get(path);
   if (!p) return `<div class="pt pt-empty">Not a tracked project — add <code>type: project</code> to the frontmatter (or run <b>Register projects</b>).</div>`;
   const ids = timeline(d, 16);
+  if (p.routine) {
+    const mine = d.routines.filter((r) => r.project === p);
+    let h = `<div class="pt">`;
+    if (p.status !== "active") h += `<div class="pt-empty">Paused (status: ${esc(p.status)}) — missed occurrences aren't recorded and the routines are hidden on Home.</div>`;
+    if (!mine.length) return h + `<div class="pt-empty">No routines yet. Add recurring tasks here, e.g. <code>- [ ] Stretch 🔁 every day ⏳ ${d.today.format("YYYY-MM-DD")}</code>.</div></div>`;
+    const nxt = mine.filter((r) => r.next).map((r) => `<li>${esc(r.name)} <span class="pt-muted">· next ${r.next === d.today.format("YYYY-MM-DD") ? "today" : getMoment()(r.next, "YYYY-MM-DD").format("ddd D MMM")} · 🔁 ${esc(r.rule)}</span></li>`);
+    if (nxt.length) h += `<div class="pt-card"><div class="pt-h">Coming up</div><ul class="pt-list">${nxt.join("")}</ul></div>`;
+    return h + routineAnalytics(d, ids, mine, `${p.name} · last ${ids.length} weeks`) + `</div>`;
+  }
   let h = `<div class="pt">`;
   if (p.objective) h += `<div class="pt-objective">🎯 ${esc(p.objective)}</div>`;
-  h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone)}${kpi("Backlog", p.backlog.length)}</div>`;
+  h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone)}${mixKpi("Unplanned · 16 wks", mixSum(d, ids, p.path))}${kpi("Backlog", p.backlog.length)}</div>`;
   h += `<div class="pt-h">Focus · last 16 weeks</div><div class="pt-strip">${ids.map((id) => {
     const hs = p.history.filter((x) => x.week === id);
     const v = hs.length ? Math.round(mean(hs.map((x) => x.score))) : null;
@@ -1871,16 +2230,16 @@ function renderProject(d, path) {
     const here = b ? b.here.filter((t) => t.status !== "-") : [];
     const w = d.weekMap.get(wid);
     const goal = w ? w.goals.find((g) => g.projectPath === p.path) : null;
-    return { wid, label, open: here.filter(isOpen).length, done: here.filter(isDone).length, moved: b ? b.carried.length : 0, goal, w };
+    return { wid, label, open: here.filter(isOpen).length, done: here.filter(isDone).length, moved: b ? b.carried.length : 0, goal, w, unpl: here.filter((t) => isUnplannedIn(t, wid)).length };
   });
-  h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Planned</span><span class="pt-muted">tasks are in the “${PLANNED_SEC}” section below</span></div><div class="pt-plan">`;
+  h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Planned</span><span class="pt-muted">tasks are in the “${PLANNED_SEC}” and “${UNPLANNED_SEC}” sections below</span></div><div class="pt-plan">`;
   for (const x of planned) {
     const total = x.open + x.done + x.moved;
     h += `<div class="pt-plan-row"><span class="pt-plan-week">${x.w && !x.w.virtual ? link(x.w.path, `${x.label} · ${shortWeek(x.wid)}`) : `${x.label} · ${shortWeek(x.wid)}`}</span>
       <span class="pt-plan-goal">${x.goal ? `🎯 ${esc(x.goal.text)}` : `<span class="pt-muted">no goal</span>`}</span>
-      <span class="pt-num">${total ? `${x.done}/${total} done${x.moved ? ` <span class="pt-muted">· ${x.moved} moved on</span>` : ""}` : `<span class="pt-muted">no tasks</span>`}</span></div>`;
+      <span class="pt-num">${total ? `${x.done}/${total} done${x.unpl ? ` <span class="pt-muted">· ${x.unpl} unplanned</span>` : ""}${x.moved ? ` <span class="pt-muted">· ${x.moved} moved on</span>` : ""}` : `<span class="pt-muted">no tasks</span>`}</span></div>`;
   }
-  h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", true]])}</div>`;
+  h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", true], ["Add tasks this week (unplanned)", "Add tasks"]])}</div>`;
   const past = p.history.filter((x) => x.week < d.curId).slice(-8).reverse();
   if (past.length) {
     h += `<div class="pt-h">Recent goals</div><table class="pt-table"><thead><tr><th>Week</th><th>Goal</th><th>Score</th><th></th></tr></thead><tbody>`;
@@ -1898,7 +2257,7 @@ function renderAnalytics(d, opts = {}) {
   const n = opts.weeks || 12;
   const ids = timeline(d, n, { trim: true });
   let h = `<div class="pt">`;
-  if (!d.weeks.some((w) => w.goals.length)) return h + `<div class="pt-empty">No weekly goals yet. Plan your first week and come back after the review.</div></div>`;
+  if (!d.weeks.some((w) => w.goals.length)) return h + `<div class="pt-empty">No weekly goals yet. Plan your first week and come back after the review.</div>${routineAnalytics(d, timeline(d, n))}</div>`;
   const lw = lastClosedWeek(d);
   if (lw) {
     const rate = Math.round((100 * lw.m.achieved) / lw.m.goals);
@@ -1908,12 +2267,15 @@ function renderAnalytics(d, opts = {}) {
     h += kpi("Tasks done", `${lw.m.done}<span class="pt-of">/${lw.m.planned}</span>`, delta(lw.m.done, baseline(d, lw.id, "done")));
     h += kpi("Carried in", lw.m.carriedIn, lw.m.carriedIn ? "goals rolled over" : "");
     if (opts.completions) h += kpi("Done outside goals", opts.completions[lw.id] || 0, "✅ elsewhere in the vault");
+    h += mixKpi("Unplanned tasks", mixSum(d, [lw.id]));
     h += `</div>`;
   }
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Average goal score per week</span><span class="pt-legend"><i class="pt-lg-bar"></i>week <i class="pt-lg-line"></i>4-week trend</span></div>${chartScores(d, ids)}</div>`;
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Tasks done vs planned</span><span class="pt-legend"><i class="pt-lg-done"></i>done <i class="pt-lg-planned"></i>planned</span></div>${chartTasks(d, ids)}</div>`;
 
-  const rows = d.projects.filter((p) => p.history.some((x) => ids.includes(x.week)) || p.status === "active");
+  h += routineAnalytics(d, ids);
+
+  const rows = d.projects.filter((p) => !p.routine && (p.history.some((x) => ids.includes(x.week)) || p.status === "active"));
   rows.sort((a, b) => (b.focusWeeks - a.focusWeeks) || a.name.localeCompare(b.name));
   h += `<div class="pt-card"><div class="pt-h">Where your weeks went</div><div class="pt-heat-wrap"><table class="pt-heat"><thead><tr><th></th>${ids.map((id) => `<th class="${id === d.curId ? "pt-axis-cur" : ""}">${shortWeek(id)}</th>`).join("")}</tr></thead><tbody>`;
   for (const p of rows) {
@@ -1926,11 +2288,11 @@ function renderAnalytics(d, opts = {}) {
   }
   h += `</tbody></table></div></div>`;
 
-  h += `<div class="pt-card"><div class="pt-h">Projects</div><table class="pt-table"><thead><tr><th>Project</th><th class="pt-num">Focus wks</th><th class="pt-num">Avg</th><th class="pt-num">Last 4</th><th class="pt-num">Tasks done</th><th class="pt-num">Backlog</th><th>Last focus</th></tr></thead><tbody>`;
-  for (const p of [...d.projects].filter((p) => p.status === "active" || p.focusWeeks).sort((a, b) => (b.focusWeeks - a.focusWeeks) || a.name.localeCompare(b.name))) {
+  h += `<div class="pt-card"><div class="pt-h">Projects</div><table class="pt-table"><thead><tr><th>Project</th><th class="pt-num">Focus wks</th><th class="pt-num">Avg</th><th class="pt-num">Last 4</th><th class="pt-num">Tasks done</th><th class="pt-num" title="Tasks picked for a week: planned / added during the week (Add tasks), last ${ids.length} weeks">Planned / unplanned</th><th class="pt-num">Backlog</th><th>Last focus</th></tr></thead><tbody>`;
+  for (const p of [...d.projects].filter((p) => !p.routine && (p.status === "active" || p.focusWeeks)).sort((a, b) => (b.focusWeeks - a.focusWeeks) || a.name.localeCompare(b.name))) {
     const trend = p.avg !== null && p.recentAvg !== null && p.focusWeeks > 4 ? (p.recentAvg - p.avg >= 5 ? ` <span class="pt-up">▲</span>` : p.avg - p.recentAvg >= 5 ? ` <span class="pt-down">▼</span>` : "") : "";
     const stale = p.status === "active" && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks);
-    h += `<tr><td>${link(p.path, p.name)}${p.status !== "active" ? ` <span class="pt-muted">${esc(p.status)}</span>` : ""}</td><td class="pt-num">${p.focusWeeks}</td><td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.recentAvg === null ? "–" : p.recentAvg + "%"}${trend}</td><td class="pt-num">${p.tasksDone}</td><td class="pt-num">${p.backlog.length}</td><td class="${stale ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td></tr>`;
+    h += `<tr><td>${link(p.path, p.name)}${p.status !== "active" ? ` <span class="pt-muted">${esc(p.status)}</span>` : ""}</td><td class="pt-num">${p.focusWeeks}</td><td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.recentAvg === null ? "–" : p.recentAvg + "%"}${trend}</td><td class="pt-num">${p.tasksDone}</td>${mixCell(mixSum(d, ids, p.path))}<td class="pt-num">${p.backlog.length}</td><td class="${stale ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td></tr>`;
   }
   h += `</tbody></table></div>`;
 
@@ -1965,7 +2327,7 @@ async function render(app, mode, path, opts = {}) {
 
 /* ------------------------------------------------------------------ entry */
 
-const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, plan: cmdPlan, planProject: cmdPlanProject, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
+const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
 
 async function ptrack(tp, cmd, ...args) {
   const app = tp.app || window.app;
@@ -1987,7 +2349,7 @@ async function run(env, cmd, ...args) {
 module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
-  getConfig, loadAll, render, run, Cancelled, Handoff, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  getConfig, loadAll, render, run, Cancelled, Handoff, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, classifyMessages, extractJson, stripThink,
 };

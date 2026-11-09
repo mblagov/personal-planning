@@ -22,8 +22,8 @@ Settings → Community plugins → Browse. Install and enable:
 - Settings → Dataview → turn on **Enable JavaScript queries**.
 
 **Templater**
-- Settings → Templater → **Template hotkeys** → add these seven files, one per row:
-  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Plan week.md`, `Plan project.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
+- Settings → Templater → **Template hotkeys** → add these eight files, one per row:
+  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
 - That's all. You do **not** need to set a template folder or a script folder.
 - Optional: Settings → Hotkeys → search "Tracker/Commands" to give them keyboard shortcuts.
 
@@ -156,16 +156,37 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
 
 **During the week.** Work from Home → Today. A goal's progress = share of its tasks done.
 
+**During the week — Add tasks.** Something came up? **Add tasks** (Home, the week note or the project page) works like Plan project for *this* week — type new tasks or pick them from the backlog, with ⏳ and 📅 — but they go to the project's `## Unplanned` section and get `[unplanned:: 2026-W46]`. Nothing is tidied first (open Planned tasks aren't asked about, done ones stay where they are). Unplanned tasks show up and count exactly like planned ones; only Analytics tells them apart: the week note and Analytics show how many tasks were unplanned, and the Projects table has a *Planned / unplanned* split per project. If the review carries an unplanned task to next week, it moves to `## Planned` (it's planned now); the marker stays, so the week it was added still counts it as unplanned.
+
 **Sunday — Weekly review.** For each goal: achieved / partly (%) / missed, and the main reason it fell short. Unfinished tasks: **plan them for next week** (their week marker changes; the goal is carried too), **return them to the backlog**, or **drop** them. Projects with picked tasks but no goal are asked about the same way. Finished tasks move from `## Planned` to a `## Done` section in each project note. Then wins, lessons, energy 1–5, and an optional short summary from the local model. It ends by offering to plan next week.
 
-## 8. What you see
+## 8. Routines
+
+Recurring routines live in **routine projects** — one per scope, e.g. `Projects/personal/Personal routines/Personal routines.md` and `Projects/common/Common routines/Common routines.md`. Mark the project note with `kind: routine` in its properties (next to `type: project`). Then write each routine as a recurring task, in any sections you like:
+
+```
+## Daily
+- [ ] Inbox zero 🔁 every day ⏳ 2026-11-09
+## Weekly
+- [ ] Weekly review 🔁 every week on Sunday ⏳ 2026-11-15
+## Monthly
+- [ ] Pay the bills 🔁 every month on the 1st 📅 2026-12-01 ⏫
+```
+
+- **Always in focus.** Routine projects need no weekly goal, are part of every week automatically, don't count toward your 5–7 goals and are never flagged as neglected. Set `status: backlog` to pause one (its routines disappear from Home and missed ones aren't recorded).
+- **Lower priority.** On Home, routines without a 📅 deadline or ⏫/🔺 are listed in a compact **Routines today** list below the focus tasks; on later days they come after project tasks, and daily ones aren't repeated under *Next 7 days*. Give a routine a 📅 or ⏫ and it ranks with project tasks. Routines never show in the *Outside focus* box.
+- **Missed = cancelled.** When you open Home (and in Plan week, Plan project and the weekly review), every routine occurrence whose date has passed is marked `- [-] … [missed:: yes] … ❌ <today>`, and the next occurrence is created — once per missed day/week/month, so a 3-day gap records 3 misses. The tracker computes the next date for `every day`, `every N days`, `every weekday`, `every [N] week[s] [on Monday, Thursday]`, `every [N] month[s] [on the 15th / on the last]`, `every year`; other rules are handed to the Tasks plugin. Cancel an occurrence yourself (`[-]` without `missed`) to skip it without it counting.
+- **Score.** Each occurrence counts in the week of its date (📅, else ⏳). A week's routine score is *done ÷ (done + missed)* — for all routines together and per routine. The **routine average** is kept separate from the goal average: the week note, Home (this week + 4-week average), the routine project's page and Analytics (*Routines*: last week, 4-week and all-weeks average, a chart per week, and a per-routine table) show it. The weekly review writes `Routines:: 80% (12/15 done, 3 missed)` into the week note and moves finished occurrences to `## Done`.
+- Routine completions don't count as *Done outside goals*.
+
+## 9. What you see
 
 - **Home**: buttons, this week's goals with progress, focus tasks (today / later this week / any day), the *Outside this week's focus* box, inbox count, 8-week momentum, what needs attention.
 - **Week note**: goals achieved, average progress, tasks done, done outside goals; then every goal with its bar and all the tasks picked for it (tick / edit / open right there).
 - **Project note**: objective, weeks in focus, average goal score, a 16-week focus strip, a **Planned** card (this week / next week: goal and tasks done) with a *Pick tasks* button, recent goals with scores and reasons. The tasks themselves are in the note's `## Planned` section.
 - **Analytics**: last week vs your 4-week average, score per week with trend, tasks done vs planned, which projects got your weeks (heatmap), project table, why goals fell short, active projects you keep skipping, review notes.
 
-## 9. The format (plain Markdown — edit by hand any time)
+## 10. The format (plain Markdown — edit by hand any time)
 
 Project note (`Sailing/Sailing.md`):
 ```
@@ -189,9 +210,11 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - `[from:: …]` = weeks it was planned for before and moved on from. Those weeks count it as *planned, not done*, so your history stays honest.
 - `🎯` lines are goals (not tasks, so they don't show up in Tasks lists). `result` and `miss` are written by the review.
 - A `[-]` task = dropped; it doesn't count. Week notes from older versions with tasks nested under goals still work.
-- Project properties: `type: project`, `status: active | backlog | done`, `scope`, `description`, `objective`, `keywords`.
+- `[unplanned:: 2026-W46]` = added during that week with **Add tasks** (lives in `## Unplanned` until the review moves it on).
+- Routine occurrences: `[missed:: yes]` on a `[-]` line = missed (counts against the routine score); `[-]` without it = skipped.
+- Project properties: `type: project`, `status: active | backlog | done`, `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.
 
-## 10. If something doesn't work
+## 11. If something doesn't work
 
 | What you see | Fix |
 |---|---|

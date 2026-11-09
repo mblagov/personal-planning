@@ -25,17 +25,19 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
     ├── personal/             # scope "personal"
     │   ├── Sailing/          # active
     │   ├── Blog/             # active
-    │   └── Spanish/          # backlog
+    │   ├── Spanish/          # backlog
+    │   └── Personal routines/  # kind: routine — daily, weekly, monthly
     └── common/               # scope "common"
         ├── Home renovation/  # active
-        └── Family trip/      # active, nothing planned this week
+        ├── Family trip/      # active, nothing planned this week
+        └── Common routines/  # kind: routine — household
 ```
 
 ## Requirements
 
 - [Obsidian](https://obsidian.md) with these community plugins:
   - **Dataview**, with *Enable JavaScript queries* turned on
-  - **Templater**: add the seven files in `Tracker/Commands/` under *Template hotkeys*
+  - **Templater**: add the eight files in `Tracker/Commands/` under *Template hotkeys*
   - **Tasks**: keep *Set done date on every completed task* on
 - Optional: a local model for sorting the inbox
   - Mac: [Ollama](https://ollama.com) (`ollama pull qwen2.5:7b-instruct`) or LM Studio
@@ -91,8 +93,9 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
 | When convenient | **Process inbox** | The local LLM suggests a project, a type (task / idea / reference), and a priority. Confident items are filed automatically. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
-| During the week | **Home** | Shows today's tasks, the next 7 days, and tasks due *outside this week's focus* |
-| Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records wins, lessons, and energy. |
+| During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
+| During the week | **Add tasks** | Adds tasks that came up to this week, in the project's `## Unplanned` section. They count like planned ones; Analytics shows the planned/unplanned split. |
+| Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records the week's routine score, wins, lessons, and energy. |
 | Anytime | **New project**, **Register projects** | Adds projects |
 
 ## Data format
@@ -145,10 +148,22 @@ keywords: [boat, marina, berth]
 | Home renovation | common | active | A high-priority task due mid-week |
 | Family trip | common | active | Not in this week's focus. A backlog task due soon appears in the *Outside focus* box. |
 | Spanish | personal | backlog | A parked project with only backlog items |
+| Personal routines | personal | routine | Daily, weekly and monthly routines with three weeks of done and missed history |
+| Common routines | common | routine | Household routines; *Pay the bills* has a deadline and ⏫, so it ranks with project tasks |
 
 - **2026-W45** is a reviewed week: goals scored at 67%, 50%, 100%, and 0%, with miss reasons, wins, lessons, and energy.
 - **2026-W46** is the current week, planned with three goals.
 - `Tracker/Inbox.md` holds four unsorted items to try **Process inbox** on.
+
+## Routines
+
+A project with `kind: routine` holds recurring tasks (🔁) and is always in focus: no weekly goal, and it doesn't count toward the 5–7 goals or the goal average.
+
+- **Missed occurrences** are cancelled as `[-] … [missed:: yes]` and the next one is created, once per missed day, week or month. This happens when Home opens, and in planning and review.
+- **Routine score:** a week's score is *done ÷ (done + missed)*, for all routines together and per routine. The routine average is reported separately on Home, the week note, the routine project page and Analytics.
+- **Priority:** routines without a 📅 or ⏫ are listed below project work on Home.
+
+See *Routines* in [Tracker/Start here.md](Tracker/Start%20here.md).
 
 ## Settings
 

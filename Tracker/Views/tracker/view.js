@@ -15,12 +15,13 @@ async function loadCore() {
   return mod.exports.core;
 }
 
-/** Tasks completed (✅ date) outside the week notes, per ISO week — "done outside goals". */
-function completionsByWeek() {
+/** Tasks completed (✅ date) outside the week notes, per ISO week — "done outside goals". Routines are scored on their own. */
+function completionsByWeek(isRoutine) {
   const out = {};
   try {
     for (const t of dv.pages().file.tasks) {
       if (!t.completed || !t.completion || String(t.path).startsWith(WEEKS_PREFIX)) continue;
+      if (isRoutine && isRoutine(String(t.path))) continue;
       if (/\[week::/.test(String(t.text || ""))) continue; // picked for a week → counted under its goal
       const iso = typeof t.completion.toISODate === "function" ? t.completion.toISODate() : String(t.completion).slice(0, 10);
       const id = window.moment(iso, "YYYY-MM-DD").format("GGGG-[W]WW");
@@ -77,8 +78,17 @@ const root = dv.el("div", "", { cls: "pt-root" });
 try {
   const core = await loadCore();
   const opts = Object.assign({}, (typeof input === "object" && input) || {});
-  if (opts.mode === "week" || opts.mode === "analytics") opts.completions = completionsByWeek();
-  if ((opts.mode || "home") === "home") opts.tasks = openTasks();
+  if (opts.mode === "week" || opts.mode === "analytics") opts.completions = completionsByWeek(core.routinePathTest(obsApp));
+  if ((opts.mode || "home") === "home") {
+    // Missed routine occurrences are cancelled (and the next ones created) when Home opens.
+    // Dataview re-renders Home after the files change, with the fresh tasks.
+    try {
+      const r = await core.rollRoutines(obsApp, window.moment().format("YYYY-MM-DD"));
+      if (r.missed) notify(`Routines: ${r.missed} missed occurrence(s) recorded; the next ones are scheduled.`);
+      if (r.stuck.length) notify(`Routines: couldn't work out the next date for ${r.stuck.join("; ")}.`);
+    } catch (e) { console.error("[tracker] routines", e); }
+    opts.tasks = openTasks();
+  }
   root.innerHTML = await core.render(obsApp, opts.mode || "home", dv.currentFilePath, opts);
 
   root.querySelectorAll("a.pt-link").forEach((a) => a.addEventListener("click", (ev) => {
