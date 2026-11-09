@@ -14,8 +14,9 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 │   ├── Start here.md         # full setup guide and user manual
 │   ├── Home.md               # main dashboard: today, this week, attention
 │   ├── Analytics.md          # 12-week trends, heatmap, miss reasons
+│   ├── Projects.md           # all projects: set priority and status
 │   ├── Config.md             # all settings (frontmatter)
-│   ├── Inbox.md              # capture queue
+│   ├── Inbox.md              # capture: tasks or any free text
 │   ├── Commands/             # Templater entry points (one per command)
 │   ├── Scripts/ptrack.js     # all logic: planning, review, inbox, LLM calls
 │   ├── Views/tracker/        # Dataview view + CSS for the dashboards
@@ -91,7 +92,8 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | When | Command | What happens |
 |---|---|---|
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
-| When convenient | **Process inbox** | The local LLM suggests a project, a type (task / idea / reference), and a priority. Confident items are filed automatically. |
+| When convenient | **Process inbox** | The local LLM reads the whole inbox note. It splits free text (notes, ideas, links) into separate items and keeps the original in `Inbox archive.md`. It then suggests a project, a type (task / idea / reference), and a priority for each item. Confident items are filed automatically. |
+| Anytime | **Projects** note | Set each project's priority (high / medium / low) and status. **Plan week** lists projects by priority. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
 | During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
 | During the week | **Add tasks** | Adds tasks that came up to this week, in the project's `## Unplanned` section. They count like planned ones; Analytics shows the planned/unplanned split. |

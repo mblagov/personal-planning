@@ -101,6 +101,15 @@ try {
     else notify(`Add “${b.dataset.cmd}” under Settings → Templater → Template hotkeys, then this button works.`);
   }));
 
+  // Projects note: priority / status dropdowns write the project's properties (Dataview then re-renders)
+  root.querySelectorAll("select.pt-select").forEach((sel) => sel.addEventListener("change", async () => {
+    const file = obsApp.vault.getAbstractFileByPath(sel.dataset.path);
+    if (!file) { notify("Couldn't find that project note any more."); return; }
+    sel.disabled = true;
+    try { await obsApp.fileManager.processFrontMatter(file, (f) => { f[sel.dataset.key] = sel.value; }); }
+    catch (e) { notify(`Couldn't save: ${e.message || e}`); sel.disabled = false; }
+  }));
+
   // Task rows: tick (through the Tasks plugin, so ✅ dates and 🔁 recurrence work), edit, open
   root.querySelectorAll(".pt-task").forEach((row) => {
     const check = row.querySelector(".pt-task-check");

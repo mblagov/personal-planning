@@ -128,3 +128,10 @@
 .pt-plan-row { display: grid; grid-template-columns: minmax(110px, auto) 1fr auto; gap: 10px; align-items: baseline; font-size: var(--font-ui-small, 13px); }
 @media (max-width: 480px) { .pt-plan-row { grid-template-columns: 1fr auto; } .pt-plan-goal { grid-column: 1 / -1; order: 3; } }
 .pt-cell.pt-heat-planned { background: var(--background-secondary); outline: 1px dashed var(--text-faint); outline-offset: -1px; color: var(--text-muted); }
+
+/* Projects note */
+.pt-projects td { vertical-align: top; }
+.pt-desc { font-size: var(--font-ui-smaller); max-width: 32em; }
+.pt-select { font-size: var(--font-ui-small); padding: 0 1.6em 0 .5em; height: auto; min-height: 1.8em; }
+.pt-prio-high .pt-select-priority { color: var(--text-error); font-weight: 600; }
+.pt-prio-low .pt-select-priority { color: var(--text-muted); }

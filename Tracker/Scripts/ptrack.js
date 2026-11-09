@@ -364,10 +364,21 @@ function listProjects(app, cfg) {
       description: String(fm.description || ""), objective: String(fm.objective || ""),
       keywords: toArr(fm.keywords),
       routine: String(fm.kind || "").toLowerCase() === "routine",
+      priority: normPriority(fm.priority),
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
+/* Project priority (frontmatter `priority`): high | medium | low, set in Tracker/Projects. Unset = medium. */
+const PROJECT_PRIOS = ["high", "medium", "low"];
+const PRIO_LABEL = { high: "⏫ high", medium: "medium", low: "🔽 low" };
+function normPriority(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "1" || s === "high" || s === "h") return "high";
+  if (s === "3" || s === "low" || s === "l") return "low";
+  return "medium";
+}
+const projPrioRank = (p) => PROJECT_PRIOS.indexOf(p.priority || "medium");
 function weekPath(cfg, id) { return `${cfg.weeks_folder}/${id}.md`; }
 function weekFiles(app, cfg) {
   const pre = cfg.weeks_folder + "/";
@@ -799,8 +810,8 @@ async function projectCatalog(app, cfg) {
   }
   return ps;
 }
-function classifyMessages(catalog, item, today) {
-  const cat = catalog.map((p) => {
+function catalogText(catalog) {
+  return catalog.map((p) => {
     let s = `${p.id} — ${p.name} [${p.scope}${p.status !== "active" ? ", " + p.status : ""}]`;
     if (p.description) s += `: ${p.description}`;
     if (p.objective) s += ` Objective: ${p.objective}.`;
@@ -808,6 +819,9 @@ function classifyMessages(catalog, item, today) {
     if (p.examples.length) s += ` Examples: ${p.examples.map((e) => `"${e}"`).join("; ")}.`;
     return s;
   }).join("\n");
+}
+function classifyMessages(catalog, item, today) {
+  const cat = catalogText(catalog);
   const system = "You sort items from a person's inbox into their projects. You answer with a single JSON object and nothing else.";
   const user = `Today is ${today}.
 
@@ -840,6 +854,138 @@ async function classifyItem(env, cfg, catalog, text) {
   };
   const out = extractJson(await llmChat(env, cfg, classifyMessages(catalog, text, env.moment().format("YYYY-MM-DD")), schema));
   return normalizeClassification(out, catalog);
+}
+/* ---- Free text in the inbox: notes, ideas, links written anywhere in the note (not as - [ ] tasks).
+ * Process inbox sends it to the model, which splits it into separate items and sorts each one;
+ * they become classified queue items, and the original text is kept in Tracker/Inbox archive.md. */
+const INBOX_ARCHIVE = `${TRACKER_ROOT}/Inbox archive.md`;
+const EXTRACT_CHUNK = 3500; // characters per model call
+/** → { idx: [line numbers], text, chunks: [{ text, idx }] } for everything in the inbox that isn't a queue task. */
+function inboxFree(lines) {
+  const n = lines.length, skip = new Array(n).fill(false);
+  let fmEnd = 0;
+  if (lines[0] === "---") { const e = lines.indexOf("---", 1); fmEnd = e > 0 ? e + 1 : 0; }
+  for (let i = 0; i < fmEnd; i++) skip[i] = true;
+  for (const it of parseItems(lines)) if (it.task && !it.parent) for (let k = it.line; k < blockEnd(lines, it); k++) skip[k] = true;
+  const mask = maskedLines(lines);
+  let callout = false;
+  for (let i = fmEnd; i < n; i++) {
+    const l = lines[i];
+    if (/^>\s*\[!/.test(l)) callout = true; else if (!/^>/.test(l)) callout = false;
+    if (callout || (!mask[i] && HEAD_RE.test(l)) || /^Capture anything (as|—|-)/i.test(l.trim())) skip[i] = true;
+  }
+  const idx = [];
+  for (let i = fmEnd; i < n; i++) if (!skip[i] && lines[i].trim() !== "") idx.push(i);
+  // chunks: consecutive paragraphs up to EXTRACT_CHUNK characters
+  const chunks = [];
+  let cur = null, last = -2;
+  for (const i of idx) {
+    const gap = i - last > 1;
+    if (!cur || (gap && cur.text.length > EXTRACT_CHUNK)) { cur = { text: "", idx: [] }; chunks.push(cur); }
+    cur.text += (cur.text ? (gap ? "\n\n" : "\n") : "") + lines[i];
+    cur.idx.push(i);
+    last = i;
+  }
+  return { idx, text: chunks.map((c) => c.text).join("\n\n"), chunks };
+}
+function extractMessages(catalog, notes, today) {
+  const system = "You turn a person's raw inbox notes into separate items and sort each one into their projects. You answer with a single JSON object and nothing else.";
+  const user = `Today is ${today}.
+
+Projects:
+${catalogText(catalog)}
+
+Split the notes below into separate, self-contained items — one per distinct action, idea or piece of information. Keep everything the person wrote; don't invent anything. Write in the language of the notes.
+For each item:
+- "text": one short line (at most about 100 characters); for a task, start with a verb.
+- "details": anything else from the notes that belongs to this item (numbers, links, names, context), or "".
+- "kind": "task" = a concrete action to do; "idea" = a possibility to think about later; "reference" = information or a link to keep.
+- "project": the id of the single best-fitting project, or "none" if no project clearly fits.
+- "priority": "high" = time-sensitive or blocking other work; "low" = nice to have; otherwise "medium".
+- "confidence": 0 to 1, how sure you are about the project choice.
+- "due": a deadline as YYYY-MM-DD only if the notes give one for a task (resolve "next Friday" etc. from today), otherwise "".
+
+Notes:
+"""
+${notes}
+"""
+
+Answer with JSON like {"items":[{"text":"Pay the deposit for the winter berth","details":"42 per metre","kind":"task","project":"P1","priority":"high","confidence":0.9,"due":"2026-11-20"}]}`;
+  return [{ role: "system", content: system }, { role: "user", content: user }];
+}
+const EXTRACT_SCHEMA = (ids) => ({
+  type: "object",
+  properties: {
+    items: { type: "array", items: { type: "object", properties: {
+      text: { type: "string" }, details: { type: "string" },
+      kind: { type: "string", enum: ["task", "idea", "reference"] },
+      project: { type: "string", enum: ids },
+      priority: { type: "string", enum: ["high", "medium", "low"] },
+      confidence: { type: "number" }, due: { type: "string" },
+    }, required: ["text", "details", "kind", "project", "priority", "confidence", "due"], additionalProperties: false } },
+  },
+  required: ["items"], additionalProperties: false,
+});
+/** The model's answer → [{ text, details, due, r: classification }]. */
+function normalizeExtraction(out, catalog) {
+  const arr = Array.isArray(out) ? out : Array.isArray(out && out.items) ? out.items : [];
+  return arr.map((x) => ({
+    text: oneLine(x && x.text),
+    details: String((x && x.details) || "").split(/\r?\n/).map((l) => l.trim().replace(/^[-*]\s+/, "")).filter(Boolean).map((l) => l.replace(/[\[\]]/g, "")),
+    due: /^\d{4}-\d{2}-\d{2}$/.test(String((x && x.due) || "")) ? x.due : null,
+    r: normalizeClassification(x || {}, catalog),
+  })).filter((x) => x.text);
+}
+/** Queue lines for extracted items: a classified - [ ] item, details as sub-bullets. */
+function extractedQueueLines(app, cfg, items, today) {
+  const out = [];
+  for (const x of items) {
+    let line = `- [ ] ${x.text}`;
+    if (x.due && x.r.kind === "task") line = setDate(line, "due", x.due);
+    line = classifiedLine(app, cfg, withCreated(line, today), x.r);
+    out.push(line, ...x.details.map((dl) => `\t- ${dl}`));
+  }
+  return out;
+}
+/** Replace the free-text lines (if they're unchanged) by the new queue items; keep the original in the archive. */
+async function applyExtraction(app, cfg, chunks, items, stamp) {
+  const today = stamp.slice(0, 10);
+  const lines = extractedQueueLines(app, cfg, items, today);
+  let removed = false;
+  await editLines(app, cfg.inbox, (ls) => {
+    const all = chunks.flatMap((c) => c.idx.map((i, j) => ({ i, raw: c.raw[j] })));
+    if (!all.every((x) => ls[x.i] === x.raw)) { // the note changed meanwhile: find the lines by text
+      for (const x of all) x.i = ls.indexOf(x.raw);
+      if (all.some((x) => x.i < 0)) return;
+    }
+    for (const x of [...all].sort((a, b) => b.i - a.i)) ls.splice(x.i, 1);
+    while (ls.length > 1 && ls[ls.length - 1].trim() === "" && ls[ls.length - 2].trim() === "") ls.pop();
+    insertIntoSection(ls, "Queue", lines);
+    removed = true;
+  });
+  if (!removed) return 0;
+  const entry = `\n## ${stamp}\n\n${chunks.map((c) => c.text).join("\n\n")}\n\n→ ${items.length} item(s): ${items.map((x) => `${x.r.kind === "task" ? "☐" : x.r.kind === "idea" ? "💡" : "📎"} ${x.text}`).join(" · ")}\n`;
+  const af = app.vault.getAbstractFileByPath(INBOX_ARCHIVE);
+  if (af) await app.vault.modify(af, (await app.vault.read(af)).replace(/\s*$/, "\n") + entry);
+  else await createFile(app, INBOX_ARCHIVE, `# Inbox archive\n\nFree text from the inbox, as you wrote it, before Process inbox split it into items.\n${entry}`);
+  return items.length;
+}
+/** Desktop (or llm_mobile: url): split the inbox's free text into items with the model. Returns how many items. */
+async function extractFreeText(env, cfg, catalog) {
+  const { app } = env;
+  const free = inboxFree((await readPath(app, cfg.inbox)).split("\n"));
+  if (!free.chunks.length) return 0;
+  const lines = (await readPath(app, cfg.inbox)).split("\n");
+  const chunks = free.chunks.map((c) => Object.assign(c, { raw: c.idx.map((i) => lines[i]) }));
+  const today = env.moment().format("YYYY-MM-DD");
+  const ids = [...catalog.map((p) => p.id), "none"];
+  const items = [];
+  for (const [i, c] of chunks.entries()) {
+    env.notice(`Reading your notes${chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : ""}…`, 3000);
+    items.push(...normalizeExtraction(extractJson(await llmChat(env, cfg, extractMessages(catalog, c.text, today), EXTRACT_SCHEMA(ids))), catalog));
+  }
+  if (!items.length) { env.notice("The model found no items in the inbox notes — they're left as they are.", 7000); return 0; }
+  return applyExtraction(app, cfg, chunks, items, env.moment().format("YYYY-MM-DD HH:mm"));
 }
 function normalizeClassification(out, catalog) {
   const pid = String(out.project || "none").trim();
@@ -940,9 +1086,20 @@ async function ask(env, labels, values, placeholder) {
 
 /* ------------------------------------------------------------------ commands: inbox */
 
+const INBOX_TEMPLATE = `---
+type: inbox
+---
+# Inbox
+
+> [!info] How this works
+> Write or paste anything in this note — tasks as \`- [ ] …\` under Queue, or plain notes, ideas and links anywhere.
+> **Process inbox** reads the whole note: the local model splits free text into tasks, ideas and references and suggests a project for each (the original text is kept in [[Inbox archive]]). Then you file each item.
+
+## Queue
+`;
 async function ensureInbox(app, cfg) {
   if (app.vault.getAbstractFileByPath(cfg.inbox)) return;
-  await createFile(app, cfg.inbox, "---\ntype: inbox\n---\n# Inbox\n\nCapture anything as `- [ ] item`. Run **Process inbox** to classify and file it.\n\n## Queue\n");
+  await createFile(app, cfg.inbox, INBOX_TEMPLATE);
 }
 
 async function cmdCapture(env) {
@@ -977,9 +1134,17 @@ async function startShortcut(env, cfg, todo, catalog) {
     const [sys, user] = classifyMessages(catalog, it.desc, today);
     return `${sys.content}\n\n${user.content}\n\nReply with the JSON object only.`;
   });
+  // free text in the note: one extraction prompt per chunk, after the item prompts
+  const lines = (await readPath(app, cfg.inbox)).split("\n");
+  const chunks = inboxFree(lines).chunks.map((c) => ({ text: c.text, idx: c.idx, raw: c.idx.map((i) => lines[i]) }));
+  for (const c of chunks) {
+    const [sys, user] = extractMessages(catalog, c.text, today);
+    prompts.push(`${sys.content}\n\n${user.content}\n\nReply with the JSON object only.`);
+  }
+  if (!prompts.length) return;
   const projects = Object.fromEntries(catalog.map((p) => [p.id, p.path]));
-  await app.vault.adapter.write(AI_REQ, JSON.stringify({ created: env.moment().format(), prompts, items: todo.map((t) => t.raw), projects }, null, 1));
-  env.notice(`Sorting ${todo.length} item(s) with the on-device model in Shortcuts… When it brings you back, tap Process inbox again.`, 8000);
+  await app.vault.adapter.write(AI_REQ, JSON.stringify({ created: env.moment().format(), prompts, items: todo.map((t) => t.raw), chunks, projects }, null, 1));
+  env.notice(`Sorting ${todo.length} item(s)${chunks.length ? ` and your notes` : ""} with the on-device model in Shortcuts… When it brings you back, tap Process inbox again.`, 8000);
   env.openUrl(`shortcuts://run-shortcut?name=${encodeURIComponent(cfg.llm_shortcut)}`);
   throw new Handoff();
 }
@@ -999,7 +1164,13 @@ async function applyShortcutResults(env, cfg) {
     catch (e) { r = { project: null, kind: "task", prio: "medium", conf: 0 }; }
     results.set(raw, r);
   });
-  const n = await writeClassifications(app, cfg, results);
+  let n = await writeClassifications(app, cfg, results);
+  const chunks = req.chunks || [];
+  if (chunks.length) {
+    const items = [];
+    chunks.forEach((c, j) => { try { items.push(...normalizeExtraction(extractJson(stripThink(answers[req.items.length + j] || "")), catalog)); } catch (e) { /* unreadable answer: keep the notes */ } });
+    if (items.length) n += await applyExtraction(app, cfg, chunks, items, env.moment().format("YYYY-MM-DD HH:mm"));
+  }
   await aiRemove(app, AI_REQ); await aiRemove(app, AI_RES);
   return { pending: false, applied: n };
 }
@@ -1019,11 +1190,15 @@ async function cmdClassify(env, { quiet = false } = {}) {
     }
     todo = await unclassified();
   }
-  if (!todo.length) { if (!quiet) env.notice("Inbox: nothing new to classify"); return 0; }
+  const hasFree = () => readPath(app, cfg.inbox).then((c) => inboxFree(c.split("\n")).chunks.length > 0);
+  if (!todo.length && !(await hasFree())) { if (!quiet) env.notice("Inbox: nothing new to classify"); return 0; }
   if (!viaShortcut) llmBase(env, cfg); // fail fast with a clear message when no model is configured for this device
   const catalog = await projectCatalog(app, cfg);
   if (!catalog.length) throw new Error("no projects found — run Register projects or New project first");
   if (viaShortcut) await startShortcut(env, cfg, todo, catalog);
+  const extracted = await extractFreeText(env, cfg, catalog);
+  if (extracted && !quiet) env.notice(`Inbox notes → ${extracted} item(s)`);
+  todo = await unclassified();
   const results = new Map();
   let i = 0;
   for (const it of todo) {
@@ -1033,8 +1208,15 @@ async function cmdClassify(env, { quiet = false } = {}) {
     results.set(it.raw, r);
   }
   await writeClassifications(app, cfg, results);
-  if (!quiet) env.notice(`Classified ${todo.length} inbox item(s)`);
-  return todo.length;
+  if (!quiet && todo.length) env.notice(`Classified ${todo.length} inbox item(s)`);
+  return todo.length + extracted;
+}
+function classifiedLine(app, cfg, line, r) {
+  line = setField(line, "to", r.project ? linkTo(app, r.project.path, cfg.inbox, r.project.name) : "none");
+  line = setField(line, "kind", r.kind);
+  line = setField(line, "conf", r.conf.toFixed(2));
+  if (r.kind === "task" && prioOf(line) === "normal" && r.prio !== "medium") line = setPrio(line, r.prio);
+  return line;
 }
 async function writeClassifications(app, cfg, results) {
   let n = 0;
@@ -1043,12 +1225,7 @@ async function writeClassifications(app, cfg, results) {
       const orig = ls[k];
       const r = results.get(orig);
       if (!r) continue;
-      let line = orig;
-      line = setField(line, "to", r.project ? linkTo(app, r.project.path, cfg.inbox, r.project.name) : "none");
-      line = setField(line, "kind", r.kind);
-      line = setField(line, "conf", r.conf.toFixed(2));
-      if (r.kind === "task" && prioOf(line) === "normal" && r.prio !== "medium") line = setPrio(line, r.prio);
-      ls[k] = line;
+      ls[k] = classifiedLine(app, cfg, orig, r);
       results.delete(orig);
       n++;
     }
@@ -1072,6 +1249,8 @@ function withCreated(line, date) {
 async function fileItem(app, cfg, raw, dest) {
   let found = false;
   const it = parseItems([raw])[0];
+  const il = (await readPath(app, cfg.inbox)).split("\n"), k0 = il.indexOf(raw);
+  const sub = k0 < 0 ? [] : (() => { const x = parseItems(il, k0, k0 + 1)[0]; return dedent(il.slice(k0 + 1, blockEnd(il, x)), x.ws).filter((l) => l.trim() !== ""); })();
   const clean = (line) => ["to", "kind", "conf", "prio"].reduce((l, k) => setField(l, k, null), line);
   const today = getMoment()().format("YYYY-MM-DD");
   let out = clean(it.raw.replace(/^[ \t]+/, ""));
@@ -1082,7 +1261,7 @@ async function fileItem(app, cfg, raw, dest) {
     out = `- ${icon} ${it.desc} (${getDate(it.raw, "created") || today})`;
   }
   const section = dest.planWeek ? PLANNED_SEC : dest.kind === "task" ? "Backlog" : "Notes & ideas";
-  await editLines(app, dest.projectPath, (ls) => insertIntoProjectSection(ls, section, [out]));
+  await editLines(app, dest.projectPath, (ls) => insertIntoProjectSection(ls, section, [out, ...sub]));
   await editLines(app, cfg.inbox, (ls) => {
     const k = ls.indexOf(raw);
     if (k >= 0) { const item = parseItems(ls, k, k + 1)[0]; ls.splice(k, blockEnd(ls, item) - k); found = true; }
@@ -1098,8 +1277,9 @@ async function cmdProcess(env) {
   try { await cmdClassify(env, { quiet: true }); }
   catch (e) { if (e instanceof Cancelled || e instanceof Handoff) throw e; env.notice(`Classifier unavailable (${e.message}) — continuing manually.`, 9000); }
   const projects = listProjects(app, cfg).filter((p) => !["done", "archived", "dropped"].includes(p.status));
-  const items = inboxItems((await readPath(app, cfg.inbox)).split("\n"));
-  if (!items.length) { env.notice("Inbox is empty 🎉"); return; }
+  const ilines = (await readPath(app, cfg.inbox)).split("\n");
+  const items = inboxItems(ilines), freeLeft = inboxFree(ilines).idx.length;
+  if (!items.length) { env.notice(freeLeft ? `Inbox: ${freeLeft} line(s) of notes need the local model to be split into items — nothing else to file.` : "Inbox is empty 🎉", 8000); return; }
   const curId = weekId(env.moment());
   const stats = { filed: 0, auto: 0, kept: 0, deleted: 0 };
   const label = (p) => `${p.name}${p.status !== "active" ? ` (${p.status})` : ""}`;
@@ -1136,7 +1316,7 @@ async function cmdProcess(env) {
     } else if (choice.a === "delete") { await deleteInboxLine(app, cfg, it.raw); stats.deleted++; }
     else stats.kept++;
   }
-  env.notice(`Inbox: filed ${stats.filed}${stats.auto ? ` (${stats.auto} automatically)` : ""}, kept ${stats.kept}, deleted ${stats.deleted}`);
+  env.notice(`Inbox: filed ${stats.filed}${stats.auto ? ` (${stats.auto} automatically)` : ""}, kept ${stats.kept}, deleted ${stats.deleted}${freeLeft ? ` · ${freeLeft} line(s) of notes left for the model` : ""}`);
 }
 
 /* ------------------------------------------------------------------ commands: projects */
@@ -1429,7 +1609,7 @@ async function cmdPlanProject(env) {
   let p = af ? data.byPath.get(af.path) || projectOfPath(data, af.path) : null;
   if (p && p.routine) p = null; // routines repeat by themselves — nothing to plan
   if (!p) {
-    const list = data.projects.filter((x) => !x.routine && !["done", "archived", "dropped"].includes(x.status));
+    const list = data.projects.filter((x) => !x.routine && !["done", "archived", "dropped"].includes(x.status)).sort((a, b) => projPrioRank(a) - projPrioRank(b) || a.name.localeCompare(b.name));
     if (!list.length) throw new Error("no projects yet — run Register projects first");
     p = await ask(env, list.map((x) => `${x.name}${x.status !== "active" ? ` (${x.status})` : ""}`), list, "Plan tasks for which project?");
   }
@@ -1464,7 +1644,7 @@ async function cmdAddTasks(env) {
   let p = af ? data.byPath.get(af.path) || projectOfPath(data, af.path) : null;
   if (p && p.routine) p = null;
   if (!p) {
-    const list = data.projects.filter((x) => !x.routine && !["done", "archived", "dropped"].includes(x.status));
+    const list = data.projects.filter((x) => !x.routine && !["done", "archived", "dropped"].includes(x.status)).sort((a, b) => projPrioRank(a) - projPrioRank(b) || a.name.localeCompare(b.name));
     if (!list.length) throw new Error("no projects yet — run Register projects first");
     p = await ask(env, list.map((x) => `${x.name}${x.status !== "active" ? ` (${x.status})` : ""}`), list, "Add unplanned tasks to which project?");
   }
@@ -1507,9 +1687,10 @@ async function cmdPlan(env, forcedId) {
     const active = data.projects.filter((p) => p.status === "active" && !p.routine); // routines are always in focus, no goal needed
     const noGoal = data.projects.filter((p) => !goalByProject.has(p.path) && pickedOpen(p.path));
     const fresh = active.filter((p) => !goalByProject.has(p.path) && !pickedOpen(p.path))
-      .sort((a, b) => (b.weeksSince ?? 999) - (a.weeksSince ?? 999) || a.name.localeCompare(b.name));
+      .sort((a, b) => projPrioRank(a) - projPrioRank(b) || (b.weeksSince ?? 999) - (a.weeksSince ?? 999) || a.name.localeCompare(b.name));
     const meta = (p) => {
       const bits = [];
+      if (p.priority !== "medium") bits.push(PRIO_LABEL[p.priority]);
       if (new Set(active.map((x) => x.scope)).size > 1) bits.push(p.scope);
       bits.push(p.lastFocus ? (p.weeksSince <= 0 ? "focused this week" : `last focus ${p.weeksSince}w ago`) : "never focused");
       if (p.avg !== null) bits.push(`avg ${p.avg}%`);
@@ -2062,7 +2243,7 @@ function baseline(d, before, key) {
 }
 function neglected(d) {
   return d.projects.filter((p) => p.status === "active" && !p.routine && !d.weekMap.get(d.curId)?.goals.some((g) => g.projectPath === p.path) && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks))
-    .sort((a, b) => (b.weeksSince ?? 999) - (a.weeksSince ?? 999));
+    .sort((a, b) => projPrioRank(a) - projPrioRank(b) || (b.weeksSince ?? 999) - (a.weeksSince ?? 999));
 }
 
 function renderHome(d, opts = {}) {
@@ -2090,7 +2271,7 @@ function renderHome(d, opts = {}) {
   h += `</div>`;
   const act = d.projects.filter((p) => p.status === "active" && !p.routine).length, back = d.projects.filter((p) => p.status === "backlog" && !p.routine).length;
   const nr = d.routines.filter((r) => r.project.status === "active").length;
-  h += `<div class="pt-foot pt-muted">${act} active · ${back} backlog projects${nr ? ` · ${nr} routines` : ""} · ${link("Tracker/Analytics.md", "Analytics →")}</div>`;
+  h += `<div class="pt-foot pt-muted">${act} active · ${back} backlog projects${nr ? ` · ${nr} routines` : ""} · ${link(PROJECTS_PATH, "Projects & priorities →")} · ${link("Tracker/Analytics.md", "Analytics →")}</div>`;
   return h + `</div>`;
 }
 
@@ -2316,12 +2497,58 @@ function renderAnalytics(d, opts = {}) {
   return h + `</div>`;
 }
 
+const PROJECTS_PATH = `${TRACKER_ROOT}/Projects.md`;
+const STATUSES = ["active", "backlog", "done"];
+function selectHtml(path, key, value, options, labels = {}) {
+  const opts = options.includes(value) ? options : [value, ...options];
+  return `<select class="dropdown pt-select pt-select-${key}" data-path="${esc(path)}" data-key="${esc(key)}" aria-label="${esc(key)}">${opts.map((o) => `<option value="${esc(o)}"${o === value ? " selected" : ""}>${esc(labels[o] || o)}</option>`).join("")}</select>`;
+}
+/** Tracker/Projects: every project, with priority and status you can change right here. */
+function renderProjects(d) {
+  let h = `<div class="pt">`;
+  const work = d.projects.filter((p) => !p.routine);
+  if (!work.length) return h + `<div class="pt-empty">No projects yet — run <b>Register projects</b>.</div></div>`;
+  const cur = d.weekMap.get(d.curId), next = d.weekMap.get(shiftWeek(d.curId, 1));
+  const inWeek = (w, p) => !!(w && (w.goals.some((g) => g.projectPath === p.path) || (w.extra || []).some((x) => x.projectPath === p.path)));
+  const counts = PROJECT_PRIOS.map((k) => `${PRIO_LABEL[k]}: ${work.filter((p) => p.status === "active" && p.priority === k).length}`).join(" · ");
+  h += `<div class="pt-summary">${work.filter((p) => p.status === "active").length} active (${counts}) · ${work.filter((p) => p.status === "backlog").length} backlog · Plan week lists projects by priority.</div>`;
+  const groups = [["Active", work.filter((p) => p.status === "active")], ["Backlog", work.filter((p) => p.status === "backlog")], ["Other", work.filter((p) => !["active", "backlog"].includes(p.status))]];
+  const multiScope = new Set(work.map((p) => p.scope)).size > 1;
+  for (const [title, ps] of groups) {
+    if (!ps.length) continue;
+    ps.sort((a, b) => projPrioRank(a) - projPrioRank(b) || (multiScope ? a.scope.localeCompare(b.scope) : 0) || a.name.localeCompare(b.name));
+    h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">${title}</span><span class="pt-count">${ps.length}</span></div><div class="pt-heat-wrap"><table class="pt-table pt-projects"><thead><tr><th>Project</th>${multiScope ? "<th>Scope</th>" : ""}<th>Priority</th><th>Status</th><th>This / next week</th><th>Last focus</th><th class="pt-num">Avg</th><th class="pt-num">Backlog</th></tr></thead><tbody>`;
+    for (const p of ps) {
+      const wk = [inWeek(cur, p) ? "this" : "", inWeek(next, p) ? "next" : ""].filter(Boolean).join(" + ");
+      h += `<tr class="pt-prio-${p.priority}"><td>${link(p.path, p.name)}${p.description ? `<div class="pt-muted pt-desc">${esc(p.description)}</div>` : `<div class="pt-muted pt-desc pt-warn">no description — the inbox model needs one</div>`}</td>`
+        + `${multiScope ? `<td class="pt-muted">${esc(p.scope)}</td>` : ""}<td>${selectHtml(p.path, "priority", p.priority, PROJECT_PRIOS, PRIO_LABEL)}</td><td>${selectHtml(p.path, "status", p.status, STATUSES)}</td>`
+        + `<td>${wk ? `🎯 ${wk}` : `<span class="pt-muted">–</span>`}</td><td class="${p.status === "active" && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks) ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td>`
+        + `<td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.backlog.length}</td></tr>`;
+    }
+    h += `</tbody></table></div></div>`;
+  }
+  const rps = d.projects.filter((p) => p.routine);
+  if (rps.length) {
+    h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">🔁 Routine projects</span><span class="pt-muted">always in focus · scored on their own</span></div><table class="pt-table"><thead><tr><th>Project</th><th>Status</th><th class="pt-num">Routines</th><th class="pt-num">4-wk avg</th></tr></thead><tbody>`;
+    for (const p of rps) {
+      const mine = d.routines.filter((r) => r.project === p);
+      const v = [...new Set(mine.flatMap((r) => [...r.weeks.keys()]))].filter((w) => w < d.curId).sort().slice(-4)
+        .map((w) => rPct(mine.reduce((a, r) => { const x = r.weeks.get(w); if (x) { a.done += x.done; a.missed += x.missed; } return a; }, R0()))).filter((x) => x !== null);
+      h += `<tr><td>${link(p.path, p.name)}</td><td>${selectHtml(p.path, "status", p.status, ["active", "backlog"], { backlog: "paused" })}</td><td class="pt-num">${mine.length}</td><td class="pt-num">${v.length ? Math.round(mean(v)) + "%" : "–"}</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+  h += `<div class="pt-muted pt-hint">Priority and status are saved in each project's properties (<code>priority</code>, <code>status</code>).</div>`;
+  return h + `</div>`;
+}
+
 async function render(app, mode, path, opts = {}) {
   const d = await loadAll(app);
   if (mode === "home") return renderHome(d, opts);
   if (mode === "week") return renderWeek(d, path, opts);
   if (mode === "project") return renderProject(d, path);
   if (mode === "analytics") return renderAnalytics(d, opts);
+  if (mode === "projects") return renderProjects(d);
   return `<div class="pt-empty">Unknown mode: ${esc(mode)}</div>`;
 }
 
@@ -2349,7 +2576,7 @@ async function run(env, cmd, ...args) {
 module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
-  getConfig, loadAll, render, run, Cancelled, Handoff, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  getConfig, loadAll, render, run, Cancelled, Handoff, inboxFree, normalizeExtraction, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, classifyMessages, extractJson, stripThink,
 };

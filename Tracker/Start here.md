@@ -44,6 +44,7 @@ Settings → Community plugins → Browse. Install and enable:
    - Folders you mark *Not a project* are remembered (`ignored_folders` in Config) and not asked about again.
    - Safe to run again later — it only asks about new folders.
 3. Give each active project a one-line **description** (note properties). The inbox classifier reads these; good descriptions matter more than the model.
+   Then open `Tracker/Projects` and set each project's **priority** (high / medium / low) and status with the dropdowns.
 4. Click **Plan week**.
 
 ## 4. Local LLM on the Mac (Ollama)
@@ -152,7 +153,7 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
 
 **Any time — Capture.** One item per line → `Tracker/Inbox.md`. Or type `- [ ] something` there directly.
 
-**When convenient — Process inbox.** The model suggests a project, a type (task / idea / reference) and a confidence. Confident items are filed automatically (`llm_auto_file_confidence`). For the rest you confirm or choose: file to a project, **plan it for this week** (goes straight to that project's `## Planned`), keep, or delete. Tasks go to the project's `## Backlog`; ideas 💡 and references 📎 to `## Notes & ideas`.
+**When convenient — Process inbox.** The model reads the **whole inbox note**, not only the `- [ ]` items: free text anywhere in it (paragraphs, plain bullets, pasted notes and links) is split into separate tasks, ideas and references, each with a short title, the rest of the text as sub-bullets, and a 📅 date when the notes give one. They join the queue as classified items, and the original text is copied to `Tracker/Inbox archive.md` first. Only the info callout, headings and the queue's tasks are left alone. On the iPhone the notes go through the same Shortcut as the items. Without a model the notes stay where they are. Then, for every item, the model suggests a project, a type (task / idea / reference) and a confidence. Confident items are filed automatically (`llm_auto_file_confidence`). For the rest you confirm or choose: file to a project, **plan it for this week** (goes straight to that project's `## Planned`), keep, or delete. Tasks go to the project's `## Backlog`; ideas 💡 and references 📎 to `## Notes & ideas`.
 
 **During the week.** Work from Home → Today. A goal's progress = share of its tasks done.
 
@@ -181,6 +182,7 @@ Recurring routines live in **routine projects** — one per scope, e.g. `Project
 
 ## 9. What you see
 
+- **Projects** (`Tracker/Projects`): every project grouped by status and ordered by priority, with dropdowns to change **priority** and **status** (saved in the project's properties), whether it's in this / next week's plan, last focus, average score and backlog size; routine projects in their own table. **Plan week** lists projects by priority (then the longest without focus), and *Needs attention* puts high-priority projects first.
 - **Home**: buttons, this week's goals with progress, focus tasks (today / later this week / any day), the *Outside this week's focus* box, inbox count, 8-week momentum, what needs attention.
 - **Week note**: goals achieved, average progress, tasks done, done outside goals; then every goal with its bar and all the tasks picked for it (tick / edit / open right there).
 - **Project note**: objective, weeks in focus, average goal score, a 16-week focus strip, a **Planned** card (this week / next week: goal and tasks done) with a *Pick tasks* button, recent goals with scores and reasons. The tasks themselves are in the note's `## Planned` section.
@@ -212,7 +214,7 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - A `[-]` task = dropped; it doesn't count. Week notes from older versions with tasks nested under goals still work.
 - `[unplanned:: 2026-W46]` = added during that week with **Add tasks** (lives in `## Unplanned` until the review moves it on).
 - Routine occurrences: `[missed:: yes]` on a `[-]` line = missed (counts against the routine score); `[-]` without it = skipped.
-- Project properties: `type: project`, `status: active | backlog | done`, `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.
+- Project properties: `type: project`, `status: active | backlog | done`, `priority: high | medium | low` (unset = medium), `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.
 
 ## 11. If something doesn't work
 

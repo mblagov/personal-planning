@@ -4,11 +4,11 @@
 What gets updated, and how:
 
   replaced   Tracker/Scripts/, Tracker/Views/, Tracker/Commands/,
-             Tracker/Start here.md, Tracker/Home.md, Tracker/Analytics.md
+             Tracker/Start here.md, Tracker/Home.md, Tracker/Analytics.md, Tracker/Projects.md
   merged     Tracker/Config.md: your values are kept; settings that are new in
              this version are added with their defaults; the help text is updated
   created    Tracker/Inbox.md, only if it doesn't exist (never overwritten)
-  untouched  Tracker/Weeks/, Tracker/AI/, your project notes, everything else
+  untouched  Tracker/Weeks/, Tracker/AI/, Tracker/Inbox archive.md, your project notes, everything else
 
 Safety:
   - Every file that is overwritten or removed is first copied to a backup folder
@@ -40,7 +40,7 @@ SRC = REPO / "Tracker"
 SAVED_PATH = REPO / ".vault-path"
 MANIFEST = "Tracker/.update-manifest.json"
 
-SYSTEM = ["Scripts", "Views", "Commands", "Start here.md", "Home.md", "Analytics.md"]
+SYSTEM = ["Scripts", "Views", "Commands", "Start here.md", "Home.md", "Analytics.md", "Projects.md"]
 CONFIG = "Tracker/Config.md"
 INBOX = "Tracker/Inbox.md"
 # On a fresh install these Config settings start empty instead of pointing at the repo's samples.
@@ -106,9 +106,20 @@ def merged_config(repo_text: str, vault_text):
 
 
 def fresh_inbox(repo_text: str) -> str:
-    """The repo's inbox without the sample items: everything up to '## Queue'."""
+    """The repo's inbox without the sample content: frontmatter, title, the info callout and '## Queue'."""
     m = re.search(r"^## Queue[^\n]*\n", repo_text, re.M)
-    return repo_text[: m.end()] + "\n" if m else repo_text
+    if not m:
+        return repo_text
+    head, keep, in_fm = repo_text[: m.start()].splitlines(), [], False
+    for i, line in enumerate(head):
+        if i == 0 and line == "---":
+            in_fm = True
+        if in_fm or line.startswith("# ") or line.startswith(">") or not line.strip():
+            keep.append(line)
+        if in_fm and i > 0 and line == "---":
+            in_fm = False
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(keep).strip("\n") + "\n\n")
+    return text + m.group(0) + "\n"
 
 
 # ---------------------------------------------------------------- plan / apply
