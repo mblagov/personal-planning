@@ -2879,15 +2879,32 @@ function mixCell(a) {
 }
 const reasonLabel = (k) => (MISS_REASONS.find((r) => r[0] === k) || [k, k])[1];
 
-function goalRows(d, w, { showProject = true, compact = false } = {}) {
+/** Move a goal (and anything nested under it) up (-1) or down (+1) in its week note. Returns false if it can't move. */
+async function moveGoal(app, weekPath, raw, delta) {
+  let moved = false;
+  await editLines(app, weekPath, (ls) => {
+    const gs = parseWeek(ls.join("\n")).goals;
+    const i = gs.findIndex((g) => g.raw === raw), j = i + delta;
+    if (i < 0 || j < 0 || j >= gs.length) return;
+    const [a, b] = i < j ? [gs[i], gs[j]] : [gs[j], gs[i]];
+    const aEnd = blockEnd(ls, a.item), bEnd = blockEnd(ls, b.item);
+    const blockA = ls.slice(a.line, aEnd), between = ls.slice(aEnd, b.line), blockB = ls.slice(b.line, bEnd);
+    ls.splice(a.line, bEnd - a.line, ...blockB, ...between, ...blockA);
+    moved = true;
+  });
+  return moved;
+}
+function goalRows(d, w, { showProject = true, compact = false, reorder = false } = {}) {
   if (!w.goals.length) return `<div class="pt-empty">No goals yet.</div>`;
-  return `<div class="pt-goals">${w.goals.map((g) => {
+  const n = w.goals.length;
+  const mv = (g, i) => (reorder && !w.virtual && n > 1 ? `<span class="pt-move">${[[-1, "↑", "Move up"], [1, "↓", "Move down"]].map(([dl, lbl, t]) => `<button class="pt-task-btn clickable-icon" data-move="${dl}" data-week="${esc(w.path)}" data-raw="${esc(g.raw)}" title="${t}" aria-label="${t}"${(dl < 0 && i === 0) || (dl > 0 && i === n - 1) ? " disabled" : ""}>${lbl}</button>`).join("")}</span>` : "");
+  return `<div class="pt-goals">${w.goals.map((g, gi) => {
     const badges = [];
     if (g.fields.from) badges.push(`<span class="pt-badge">carried from ${esc(linkLabel(g.fields.from))}</span>`);
     if (g.fields.miss) badges.push(`<span class="pt-badge pt-badge-miss">${esc(reasonLabel(g.fields.miss))}</span>`);
     const proj = g.projectPath ? link(g.projectPath, g.projectName, "pt-proj") : `<span class="pt-proj">${esc(g.projectName)}</span>`;
     return `<div class="pt-goal ${g.score >= 100 ? "is-done" : ""}">
-      <div class="pt-goal-head">${showProject ? proj : ""}<span class="pt-goal-text">${esc(g.text)}</span>${badges.join("")}</div>
+      <div class="pt-goal-head">${showProject ? proj : ""}<span class="pt-goal-text">${esc(g.text)}</span>${badges.join("")}${mv(g, gi)}</div>
       <div class="pt-goal-bar">${bar(g.score)}<span class="pt-goal-num">${g.score}%</span>${compact ? "" : `<span class="pt-goal-tasks">${g.doneCount}/${g.counted.length} tasks</span>`}</div>
     </div>`;
   }).join("")}</div>`;
@@ -2960,7 +2977,7 @@ function renderHome(d, opts = {}) {
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">This week</span><span class="pt-muted">${w ? link(w.path, `${d.curId} · ${weekRange(d.curId)}`) : `${d.curId} · ${weekRange(d.curId)}`}</span></div>`;
   if (w && w.goals.length) {
     h += `<div class="pt-summary">${w.m.achieved}/${w.m.goals} goals done · ${w.m.done}/${w.m.planned} tasks · ${w.status === "reviewed" ? "reviewed" : daysLeft ? `${daysLeft} day${daysLeft > 1 ? "s" : ""} left` : "last day"}</div>`;
-    h += goalRows(d, w, { compact: true });
+    h += goalRows(d, w, { compact: true, reorder: true });
   } else h += `<div class="pt-empty">No plan for this week yet — hit <b>Plan week</b>.</div>`;
   h += `</div>`;
   if (opts.tasks) h += renderTaskWidgets(d, opts.tasks);
@@ -3340,7 +3357,7 @@ async function run(env, cmd, ...args) {
 module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
-  getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
+  getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
   parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,

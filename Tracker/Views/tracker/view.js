@@ -177,6 +177,14 @@ try {
       await draw();
     }));
 
+    // Home: reorder this week's projects (moves the goal lines in the week note)
+    root.querySelectorAll("button[data-move]").forEach((b) => b.addEventListener("click", async () => {
+      root.querySelectorAll("button[data-move]").forEach((x) => { x.disabled = true; });
+      try { if (!(await core.moveGoal(obsApp, b.dataset.week, b.dataset.raw, Number(b.dataset.move)))) notify("Couldn't move it — the week note changed. Try again."); }
+      catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
+      await draw();
+    }));
+
     // Project page: tasks vs goals, duplicates (local model)
     root.querySelectorAll("button[data-ai]").forEach((b) => b.addEventListener("click", async () => {
       root.querySelectorAll("button[data-ai]").forEach((x) => { x.disabled = true; });

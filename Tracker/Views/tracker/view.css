@@ -168,3 +168,9 @@
 .pt-ai-row { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; padding: 5px 0; border-top: 1px solid var(--background-modifier-border); font-size: var(--font-ui-small); }
 .pt-ai-row .pt-muted { font-size: var(--font-ui-smaller); }
 .pt-ai-btns { display: flex; gap: 4px; flex-shrink: 0; }
+
+/* Home: reorder this week's projects */
+.pt-move { margin-left: auto; display: inline-flex; gap: 2px; opacity: .35; transition: opacity .15s; }
+.pt-goal:hover .pt-move, .pt-move:focus-within { opacity: 1; }
+.pt-move button[disabled] { visibility: hidden; }
+@media (hover: none) { .pt-move { opacity: 1; } }
