@@ -20,6 +20,7 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 │   ├── Scripts/ptrack.js     # all logic: planning, review, inbox, LLM calls
 │   ├── Views/tracker/        # Dataview view + CSS for the dashboards
 │   └── Weeks/                # week notes (sample: 2026-W45, 2026-W46)
+├── scripts/update-vault.py   # install/update Tracker in your vault, keeping your data
 └── Projects/                 # sample projects, one folder per project
     ├── personal/             # scope "personal"
     │   ├── Sailing/          # active
@@ -48,12 +49,40 @@ See [Tracker/Start here.md](Tracker/Start%20here.md) for step-by-step setup, the
 
 **Use it in your own vault:**
 
-1. Copy the `Tracker/` folder to the **top level** of your vault.
-2. Delete `Tracker/Weeks/*`, and set `project_roots: []` in `Tracker/Config.md`.
-3. Clear the sample items from `Tracker/Inbox.md`.
-4. Run **Register projects**. It asks which folders hold your projects, and sets each project to active, backlog, or not a project.
-5. Give each active project a one-line `description`. The inbox classifier relies on it.
-6. Run **Plan week**.
+1. Run `scripts/update-vault.py "/path/to/your/vault"` (see [Updating your vault](#updating-your-vault)). It installs `Tracker/` without the sample data.
+2. In Obsidian, run **Register projects**. It asks which folders hold your projects, and sets each project to active, backlog, or not a project.
+3. Give each active project a one-line `description`. The inbox classifier relies on it.
+4. Run **Plan week**.
+
+## Updating your vault
+
+`scripts/update-vault.py` installs or updates the tracker in your vault without touching your data. It needs only Python 3, which macOS already has.
+
+```bash
+scripts/update-vault.py --dry-run "/path/to/your/vault"
+```
+
+```bash
+scripts/update-vault.py "/path/to/your/vault"
+```
+
+The script shows its plan and asks before changing anything. It remembers the vault path in `.vault-path` (ignored by git), so after the first run `scripts/update-vault.py` is enough. An iCloud vault lives under `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/<vault>`.
+
+| Files in the vault | What the script does |
+|---|---|
+| `Tracker/Scripts/`, `Views/`, `Commands/`, `Start here.md`, `Home.md`, `Analytics.md` | Replaces them with the repo's version |
+| `Tracker/Config.md` | Merges it. Your values stay, new settings are added with their defaults, and the help text is updated. |
+| `Tracker/Inbox.md` | Creates it only if it's missing. It never overwrites it. |
+| `Tracker/Weeks/`, `Tracker/AI/`, your projects, all other notes | Never touches them |
+
+Every file it replaces or removes is first copied to `~/ObsidianTrackerBackups/<vault>-<timestamp>/`. You can change that folder with `--backup-dir`.
+
+The script keeps a manifest in `Tracker/.update-manifest.json`. It uses it in two ways:
+
+- If you edited a system file yourself, the script warns you before overwriting it.
+- A file that a newer version no longer ships is removed, but only if you never edited it.
+
+On a fresh install, `Config.md` starts with empty `project_roots`, and the sample weeks and inbox items are not copied. After an update, run **Register projects** once in Obsidian, so existing projects get any new sections.
 
 ## The weekly loop
 

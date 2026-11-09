@@ -10,3 +10,6 @@ Tracker/AI/
 *.zip
 
 .DS_Store
+
+# Local vault path for scripts/update-vault.py
+.vault-path
