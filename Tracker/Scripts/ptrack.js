@@ -25,7 +25,11 @@ const DEFAULTS = {
   llm_provider: "ollama",
   llm_url: "http://localhost:11434",
   llm_model: "qwen2.5:7b-instruct",
-  llm_auto_file_confidence: 0.9,
+  llm_flag_below: 0.6,          // the review marks items the model is less sure about with [check:: unsure]
+  reference_folder: "References", // reference notes: places to visit, recommendations, how-tos… (one note per topic)
+  finance_file: "Finance/Spendings.md", // spendings from the inbox are collected here
+  finance_project: "",          // project for the "Process new spendings" task; empty = in the finance file
+  currency: "",                 // currency for spendings that don't say, e.g. EUR
   llm_examples_per_project: 3,
   llm_mobile: "off",            // iPhone: off | shortcut (Apple on-device model via Shortcuts) | url
   llm_shortcut: "Tracker Classify",
@@ -101,7 +105,7 @@ function getConfig(app) {
   for (const k of Object.keys(DEFAULTS)) if (fm[k] !== undefined && fm[k] !== null && fm[k] !== "") cfg[k] = fm[k];
   cfg.project_roots = toArr(cfg.project_roots).map((r) => r.replace(/\/+$/, ""));
   cfg.weeks_folder = String(cfg.weeks_folder).replace(/\/+$/, "");
-  for (const k of ["goals_min", "goals_max", "neglect_weeks", "plan_next_week_from", "upcoming_days", "llm_auto_file_confidence", "llm_examples_per_project"]) cfg[k] = Number(cfg[k]);
+  for (const k of ["goals_min", "goals_max", "neglect_weeks", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project"]) cfg[k] = Number(cfg[k]);
   return cfg;
 }
 
@@ -654,12 +658,12 @@ async function loadAll(app) {
   for (const wid of sel.keys()) if (!seen.has(wid) && weekStart(wid)) { seen.add(wid); weeks.push({ id: wid, path: weekPath(cfg, wid), file: null, virtual: true, status: "planned", goals: [], review: {}, lines: [] }); }
   weeks.sort((a, b) => a.id.localeCompare(b.id));
   for (const w of weeks) attachSelections(w, sel.get(w.id), byPath);
-  const inbox = { path: cfg.inbox, open: 0, classified: 0 };
+  const inbox = { path: cfg.inbox, open: 0, free: 0, review: !!(await loadSnap(app)) };
   const ib = app.vault.getAbstractFileByPath(cfg.inbox);
   if (ib) {
     const items = inboxItems((await app.vault.cachedRead(ib)).split("\n"));
     inbox.open = items.length;
-    inbox.classified = items.filter((i) => i.fields.to).length;
+    inbox.free = inboxFree((await app.vault.cachedRead(ib)).split("\n")).idx.length;
   }
   const d = computeStats({ app, cfg, projects, byPath, weeks, sel, inbox, today: m(), curId: weekId(m()) });
   loadRoutines(d, linesByPath);
@@ -890,41 +894,6 @@ function catalogText(catalog) {
     return s;
   }).join("\n");
 }
-function classifyMessages(catalog, item, today) {
-  const cat = catalogText(catalog);
-  const system = "You sort items from a person's inbox into their projects. You answer with a single JSON object and nothing else.";
-  const user = `Today is ${today}.
-
-Projects:
-${cat}
-
-Rules:
-- "project": the id of the single best-fitting project, or "none" if no project clearly fits.
-- "kind": "task" = a concrete action to do; "idea" = a possibility to think about later; "reference" = information or a link to keep.
-- "priority": "high" = time-sensitive or blocking other work; "low" = nice to have; otherwise "medium".
-- "confidence": 0 to 1, how sure you are about the project choice.
-
-Item: "${item}"
-
-Answer with JSON like {"project":"P1","kind":"task","priority":"medium","confidence":0.8}`;
-  return [{ role: "system", content: system }, { role: "user", content: user }];
-}
-async function classifyItem(env, cfg, catalog, text) {
-  const ids = [...catalog.map((p) => p.id), "none"];
-  const schema = {
-    type: "object",
-    properties: {
-      project: { type: "string", enum: ids },
-      kind: { type: "string", enum: ["task", "idea", "reference"] },
-      priority: { type: "string", enum: ["high", "medium", "low"] },
-      confidence: { type: "number" },
-    },
-    required: ["project", "kind", "priority", "confidence"],
-    additionalProperties: false,
-  };
-  const out = extractJson(await llmChat(env, cfg, classifyMessages(catalog, text, env.moment().format("YYYY-MM-DD")), schema));
-  return normalizeClassification(out, catalog);
-}
 /* ---- Free text in the inbox: notes, ideas, links written anywhere in the note (not as - [ ] tasks).
  * Process inbox sends it to the model, which splits it into separate items and sorts each one;
  * they become classified queue items, and the original text is kept in Tracker/Inbox archive.md. */
@@ -958,116 +927,6 @@ function inboxFree(lines) {
   }
   return { idx, text: chunks.map((c) => c.text).join("\n\n"), chunks };
 }
-function extractMessages(catalog, notes, today) {
-  const system = "You turn a person's raw inbox notes into separate items and sort each one into their projects. You answer with a single JSON object and nothing else.";
-  const user = `Today is ${today}.
-
-Projects:
-${catalogText(catalog)}
-
-Split the notes below into separate, self-contained items — one per distinct action, idea or piece of information. Keep everything the person wrote; don't invent anything. Write in the language of the notes.
-For each item:
-- "text": one short line (at most about 100 characters); for a task, start with a verb.
-- "details": anything else from the notes that belongs to this item (numbers, links, names, context), or "".
-- "kind": "task" = a concrete action to do; "idea" = a possibility to think about later; "reference" = information or a link to keep.
-- "project": the id of the single best-fitting project, or "none" if no project clearly fits.
-- "priority": "high" = time-sensitive or blocking other work; "low" = nice to have; otherwise "medium".
-- "confidence": 0 to 1, how sure you are about the project choice.
-- "due": a deadline as YYYY-MM-DD only if the notes give one for a task (resolve "next Friday" etc. from today), otherwise "".
-
-Notes:
-"""
-${notes}
-"""
-
-Answer with JSON like {"items":[{"text":"Pay the deposit for the winter berth","details":"42 per metre","kind":"task","project":"P1","priority":"high","confidence":0.9,"due":"2026-11-20"}]}`;
-  return [{ role: "system", content: system }, { role: "user", content: user }];
-}
-const EXTRACT_SCHEMA = (ids) => ({
-  type: "object",
-  properties: {
-    items: { type: "array", items: { type: "object", properties: {
-      text: { type: "string" }, details: { type: "string" },
-      kind: { type: "string", enum: ["task", "idea", "reference"] },
-      project: { type: "string", enum: ids },
-      priority: { type: "string", enum: ["high", "medium", "low"] },
-      confidence: { type: "number" }, due: { type: "string" },
-    }, required: ["text", "details", "kind", "project", "priority", "confidence", "due"], additionalProperties: false } },
-  },
-  required: ["items"], additionalProperties: false,
-});
-/** The model's answer → [{ text, details, due, r: classification }]. */
-function normalizeExtraction(out, catalog) {
-  const arr = Array.isArray(out) ? out : Array.isArray(out && out.items) ? out.items : [];
-  return arr.map((x) => ({
-    text: oneLine(x && x.text),
-    details: String((x && x.details) || "").split(/\r?\n/).map((l) => l.trim().replace(/^[-*]\s+/, "")).filter(Boolean).map((l) => l.replace(/[\[\]]/g, "")),
-    due: /^\d{4}-\d{2}-\d{2}$/.test(String((x && x.due) || "")) ? x.due : null,
-    r: normalizeClassification(x || {}, catalog),
-  })).filter((x) => x.text);
-}
-/** Queue lines for extracted items: a classified - [ ] item, details as sub-bullets. */
-function extractedQueueLines(app, cfg, items, today) {
-  const out = [];
-  for (const x of items) {
-    let line = `- [ ] ${x.text}`;
-    if (x.due && x.r.kind === "task") line = setDate(line, "due", x.due);
-    line = classifiedLine(app, cfg, withCreated(line, today), x.r);
-    out.push(line, ...x.details.map((dl) => `\t- ${dl}`));
-  }
-  return out;
-}
-/** Replace the free-text lines (if they're unchanged) by the new queue items; keep the original in the archive. */
-async function applyExtraction(app, cfg, chunks, items, stamp) {
-  const today = stamp.slice(0, 10);
-  const lines = extractedQueueLines(app, cfg, items, today);
-  let removed = false;
-  await editLines(app, cfg.inbox, (ls) => {
-    const all = chunks.flatMap((c) => c.idx.map((i, j) => ({ i, raw: c.raw[j] })));
-    if (!all.every((x) => ls[x.i] === x.raw)) { // the note changed meanwhile: find the lines by text
-      for (const x of all) x.i = ls.indexOf(x.raw);
-      if (all.some((x) => x.i < 0)) return;
-    }
-    for (const x of [...all].sort((a, b) => b.i - a.i)) ls.splice(x.i, 1);
-    while (ls.length > 1 && ls[ls.length - 1].trim() === "" && ls[ls.length - 2].trim() === "") ls.pop();
-    insertIntoSection(ls, "Queue", lines);
-    removed = true;
-  });
-  if (!removed) return 0;
-  const entry = `\n## ${stamp}\n\n${chunks.map((c) => c.text).join("\n\n")}\n\n→ ${items.length} item(s): ${items.map((x) => `${x.r.kind === "task" ? "☐" : x.r.kind === "idea" ? "💡" : "📎"} ${x.text}`).join(" · ")}\n`;
-  const af = app.vault.getAbstractFileByPath(INBOX_ARCHIVE);
-  if (af) await app.vault.modify(af, (await app.vault.read(af)).replace(/\s*$/, "\n") + entry);
-  else await createFile(app, INBOX_ARCHIVE, `# Inbox archive\n\nFree text from the inbox, as you wrote it, before Process inbox split it into items.\n${entry}`);
-  return items.length;
-}
-/** Desktop (or llm_mobile: url): split the inbox's free text into items with the model. Returns how many items. */
-async function extractFreeText(env, cfg, catalog) {
-  const { app } = env;
-  const free = inboxFree((await readPath(app, cfg.inbox)).split("\n"));
-  if (!free.chunks.length) return 0;
-  const lines = (await readPath(app, cfg.inbox)).split("\n");
-  const chunks = free.chunks.map((c) => Object.assign(c, { raw: c.idx.map((i) => lines[i]) }));
-  const today = env.moment().format("YYYY-MM-DD");
-  const ids = [...catalog.map((p) => p.id), "none"];
-  const items = [];
-  for (const [i, c] of chunks.entries()) {
-    env.notice(`Reading your notes${chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : ""}…`, 3000);
-    items.push(...normalizeExtraction(extractJson(await llmChat(env, cfg, extractMessages(catalog, c.text, today), EXTRACT_SCHEMA(ids))), catalog));
-  }
-  if (!items.length) { env.notice("The model found no items in the inbox notes — they're left as they are.", 7000); return 0; }
-  return applyExtraction(app, cfg, chunks, items, env.moment().format("YYYY-MM-DD HH:mm"));
-}
-function normalizeClassification(out, catalog) {
-  const pid = String(out.project || "none").trim();
-  const proj = catalog.find((p) => p.id === pid) || catalog.find((p) => p.name.toLowerCase() === pid.toLowerCase());
-  const kind = ["task", "idea", "reference"].includes(out.kind) ? out.kind : "task";
-  const prio = ["high", "medium", "low"].includes(out.priority) ? out.priority : "medium";
-  let conf = Number(out.confidence);
-  if (isNaN(conf)) conf = 0.5;
-  if (conf > 1) conf = conf / 100;
-  return { project: proj || null, kind, prio, conf: clamp(conf, 0, 1) };
-}
-
 /* ------------------------------------------------------------------ templates */
 
 function weekNote(id) {
@@ -1162,8 +1021,8 @@ type: inbox
 # Inbox
 
 > [!info] How this works
-> Write or paste anything in this note — tasks as \`- [ ] …\` under Queue, or plain notes, ideas and links anywhere.
-> **Process inbox** reads the whole note: the local model splits free text into tasks, ideas and references and suggests a project for each (the original text is kept in [[Inbox archive]]). Then you file each item.
+> Write or paste anything in this note — tasks as \`- [ ] …\` under Queue, or plain notes, ideas, places, links and spendings anywhere.
+> **Process inbox** reads the whole note and sorts it into [[Classified inbox]] — tasks and ideas to projects, reference information to your reference notes, spendings to your finance note. This note isn't changed until you check that and press **Apply inbox**; then everything is filed, the original text is kept in [[Inbox archive]], and this note is cleared.
 
 ## Queue
 `;
@@ -1195,56 +1054,6 @@ const AI_RES = `${AI_DIR}/response.txt`;
 const SHORTCUT_SEP = "#####";
 async function aiExists(app, p) { try { return await app.vault.adapter.exists(p); } catch (e) { return false; } }
 async function aiRemove(app, p) { try { if (await aiExists(app, p)) await app.vault.adapter.remove(p); } catch (e) { /* ignore */ } }
-async function startShortcut(env, cfg, todo, catalog) {
-  const { app } = env;
-  if (!(await aiExists(app, AI_DIR))) await app.vault.adapter.mkdir(AI_DIR);
-  await aiRemove(app, AI_RES);
-  const today = env.moment().format("YYYY-MM-DD");
-  const prompts = todo.map((it) => {
-    const [sys, user] = classifyMessages(catalog, it.desc, today);
-    return `${sys.content}\n\n${user.content}\n\nReply with the JSON object only.`;
-  });
-  // free text in the note: one extraction prompt per chunk, after the item prompts
-  const lines = (await readPath(app, cfg.inbox)).split("\n");
-  const chunks = inboxFree(lines).chunks.map((c) => ({ text: c.text, idx: c.idx, raw: c.idx.map((i) => lines[i]) }));
-  for (const c of chunks) {
-    const [sys, user] = extractMessages(catalog, c.text, today);
-    prompts.push(`${sys.content}\n\n${user.content}\n\nReply with the JSON object only.`);
-  }
-  if (!prompts.length) return;
-  const projects = Object.fromEntries(catalog.map((p) => [p.id, p.path]));
-  await app.vault.adapter.write(AI_REQ, JSON.stringify({ created: env.moment().format(), prompts, items: todo.map((t) => t.raw), chunks, projects }, null, 1));
-  env.notice(`Sorting ${todo.length} item(s)${chunks.length ? ` and your notes` : ""} with the on-device model in Shortcuts… When it brings you back, tap Process inbox again.`, 8000);
-  env.openUrl(`shortcuts://run-shortcut?name=${encodeURIComponent(cfg.llm_shortcut)}`);
-  throw new Handoff();
-}
-/** Apply answers saved by the shortcut. Returns {pending, applied}. */
-async function applyShortcutResults(env, cfg) {
-  const { app } = env;
-  if (!(await aiExists(app, AI_REQ))) return { pending: false, applied: 0 };
-  if (!(await aiExists(app, AI_RES))) return { pending: true, applied: 0 };
-  const req = JSON.parse(await app.vault.adapter.read(AI_REQ));
-  const answers = (await app.vault.adapter.read(AI_RES)).split(SHORTCUT_SEP);
-  const all = listProjects(app, cfg);
-  const catalog = Object.entries(req.projects || {}).map(([id, path]) => all.find((p) => p.path === path) && Object.assign({}, all.find((p) => p.path === path), { id })).filter(Boolean);
-  const results = new Map();
-  req.items.forEach((raw, i) => {
-    let r;
-    try { r = normalizeClassification(extractJson(stripThink(answers[i] || "")), catalog); }
-    catch (e) { r = { project: null, kind: "task", prio: "medium", conf: 0 }; }
-    results.set(raw, r);
-  });
-  let n = await writeClassifications(app, cfg, results);
-  const chunks = req.chunks || [];
-  if (chunks.length) {
-    const items = [];
-    chunks.forEach((c, j) => { try { items.push(...normalizeExtraction(extractJson(stripThink(answers[req.items.length + j] || "")), catalog)); } catch (e) { /* unreadable answer: keep the notes */ } });
-    if (items.length) n += await applyExtraction(app, cfg, chunks, items, env.moment().format("YYYY-MM-DD HH:mm"));
-  }
-  await aiRemove(app, AI_REQ); await aiRemove(app, AI_RES);
-  return { pending: false, applied: n };
-}
-
 /* ------------------------------------------------------------------ project descriptions (LLM)
  * The inbox model sorts notes into projects by their descriptions, so the Projects note can have the local
  * model rate each description, and write one from what's in the project's folder.
@@ -1409,64 +1218,6 @@ async function descAction(env, act, path) {
   return msg;
 }
 
-async function cmdClassify(env, { quiet = false } = {}) {
-  const { app } = env, cfg = getConfig(app);
-  await ensureInbox(app, cfg);
-  const unclassified = async () => inboxItems((await readPath(app, cfg.inbox)).split("\n")).filter((i) => !i.fields.to);
-  let todo = await unclassified();
-  const viaShortcut = env.isMobile && String(cfg.llm_mobile).toLowerCase() === "shortcut";
-  if (viaShortcut) {
-    const st = await applyShortcutResults(env, cfg);
-    if (st.applied) { if (!quiet) env.notice(`Applied ${st.applied} result(s) from the on-device model`); return st.applied; }
-    if (st.pending) {
-      const c = await ask(env, ["↻ Run the on-device model again", "Continue without AI"], ["run", "skip"], "No answers from the shortcut yet");
-      if (c === "skip") { await aiRemove(app, AI_REQ); return 0; }
-    }
-    todo = await unclassified();
-  }
-  const hasFree = () => readPath(app, cfg.inbox).then((c) => inboxFree(c.split("\n")).chunks.length > 0);
-  if (!todo.length && !(await hasFree())) { if (!quiet) env.notice("Inbox: nothing new to classify"); return 0; }
-  if (!viaShortcut) llmBase(env, cfg); // fail fast with a clear message when no model is configured for this device
-  const catalog = await projectCatalog(app, cfg);
-  if (!catalog.length) throw new Error("no projects found — run Register projects or New project first");
-  if (viaShortcut) await startShortcut(env, cfg, todo, catalog);
-  const extracted = await extractFreeText(env, cfg, catalog);
-  if (extracted && !quiet) env.notice(`Inbox notes → ${extracted} item(s)`);
-  todo = await unclassified();
-  const results = new Map();
-  let i = 0;
-  for (const it of todo) {
-    i++;
-    env.notice(`Classifying ${i}/${todo.length}: ${it.desc.slice(0, 40)}`, 2500);
-    const r = await classifyItem(env, cfg, catalog, it.desc);
-    results.set(it.raw, r);
-  }
-  await writeClassifications(app, cfg, results);
-  if (!quiet && todo.length) env.notice(`Classified ${todo.length} inbox item(s)`);
-  return todo.length + extracted;
-}
-function classifiedLine(app, cfg, line, r) {
-  line = setField(line, "to", r.project ? linkTo(app, r.project.path, cfg.inbox, r.project.name) : "none");
-  line = setField(line, "kind", r.kind);
-  line = setField(line, "conf", r.conf.toFixed(2));
-  if (r.kind === "task" && prioOf(line) === "normal" && r.prio !== "medium") line = setPrio(line, r.prio);
-  return line;
-}
-async function writeClassifications(app, cfg, results) {
-  let n = 0;
-  await editLines(app, cfg.inbox, (ls) => {
-    for (let k = 0; k < ls.length; k++) {
-      const orig = ls[k];
-      const r = results.get(orig);
-      if (!r) continue;
-      ls[k] = classifiedLine(app, cfg, orig, r);
-      results.delete(orig);
-      n++;
-    }
-  });
-  return n;
-}
-
 /** Normalise a task line for the Tasks plugin: open checkbox, optional global-filter tag, ➕ created date. */
 function newTask(cfg, line, today) {
   let out = /^\s*[-*+]\s+\[.\]/.test(line) ? line.replace(/^\s+/, "") : `- [ ] ${line.replace(/^\s*[-*+]\s+/, "").trim()}`;
@@ -1479,78 +1230,709 @@ function withCreated(line, date) {
   return getDate(line, "created") ? line : setDate(line, "created", date);
 }
 
-/** Move one inbox line (by exact text) to a project / week goal. */
-async function fileItem(app, cfg, raw, dest) {
-  let found = false;
-  const it = parseItems([raw])[0];
-  const il = (await readPath(app, cfg.inbox)).split("\n"), k0 = il.indexOf(raw);
-  const sub = k0 < 0 ? [] : (() => { const x = parseItems(il, k0, k0 + 1)[0]; return dedent(il.slice(k0 + 1, blockEnd(il, x)), x.ws).filter((l) => l.trim() !== ""); })();
-  const clean = (line) => ["to", "kind", "conf", "prio"].reduce((l, k) => setField(l, k, null), line);
-  const today = getMoment()().format("YYYY-MM-DD");
-  let out = clean(it.raw.replace(/^[ \t]+/, ""));
-  if (dest.kind === "task" || dest.planWeek) out = newTask(cfg, out, today);
-  if (dest.planWeek) out = setField(out, "week", dest.planWeek);
-  if (dest.kind !== "task" && !dest.planWeek) {
-    const icon = dest.kind === "idea" ? "💡" : "📎";
-    out = `- ${icon} ${it.desc} (${getDate(it.raw, "created") || today})`;
-  }
-  const section = dest.planWeek ? PLANNED_SEC : dest.kind === "task" ? "Backlog" : "Notes & ideas";
-  await editLines(app, dest.projectPath, (ls) => insertIntoProjectSection(ls, section, [out, ...sub]));
-  await editLines(app, cfg.inbox, (ls) => {
-    const k = ls.indexOf(raw);
-    if (k >= 0) { const item = parseItems(ls, k, k + 1)[0]; ls.splice(k, blockEnd(ls, item) - k); found = true; }
-  });
-  return found;
+/* ------------------------------------------------------------------ inbox → Classified inbox → apply
+ * Process inbox never changes the inbox. The model's proposal goes to Tracker/Classified inbox.md for you to review:
+ *   ## Tasks, ## Ideas  → a project                            [to:: [[Sailing]]]
+ *   ## References       → a reference note in reference_folder [to:: [[Travel]]] (never a project unless you write one)
+ *   ## Spendings        → collected in finance_file, plus one task to process them
+ * Apply inbox moves everything to its place, archives what the inbox held, and clears it.
+ * Tracker/AI/classified.json keeps the exact inbox lines that were classified, so anything you add
+ * to the inbox after classifying stays there. */
+const REVIEW_PATH = `${TRACKER_ROOT}/Classified inbox.md`;
+const REVIEW_SNAP = `${AI_DIR}/classified.json`;
+const KINDS = ["task", "idea", "reference", "spending"];
+const REVIEW_SECS = { task: "Tasks", idea: "Ideas", reference: "References", spending: "Spendings" };
+const KIND_ICON = { task: "☐", idea: "💡", reference: "📎", spending: "💶" };
+const KIND_NAME = { task: "task", idea: "idea", reference: "reference", spending: "spending" };
+const SPEND_TASK_RE = /Process \d+ new spending\(s\)/;
+
+function referenceNotes(app, cfg) {
+  const root = String(cfg.reference_folder || "").replace(/\/+$/, "");
+  if (!root) return [];
+  return app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(root + "/")).map((f) => {
+    const fm = app.metadataCache.getFileCache(f)?.frontmatter || {};
+    return { path: f.path, file: f, name: String(fm.title || f.basename), description: String(fm.description || ""), keywords: toArr(fm.keywords) };
+  }).sort((a, b) => a.name.localeCompare(b.name));
 }
-async function deleteInboxLine(app, cfg, raw) {
-  await editLines(app, cfg.inbox, (ls) => { const k = ls.indexOf(raw); if (k >= 0) ls.splice(k, 1); });
+async function inboxCatalog(app, cfg) {
+  const projects = (await projectCatalog(app, cfg)).filter((p) => !p.routine);
+  projects.forEach((p, i) => { p.id = `P${i + 1}`; });
+  const refs = referenceNotes(app, cfg);
+  refs.forEach((r, i) => { r.id = `R${i + 1}`; });
+  return { projects, refs };
+}
+function refsText(refs) {
+  return refs.length ? refs.map((r) => `${r.id} — ${r.name}${r.description ? `: ${r.description}` : ""}${r.keywords.length ? ` Keywords: ${r.keywords.join(", ")}.` : ""}`).join("\n") : "(none yet)";
+}
+function inboxRules(cfg) {
+  return `- "kind": "task" = a concrete action to do; "idea" = a possibility to think about later; "reference" = information to keep for later: places to visit, restaurants, addresses, recommendations, facts, how-tos, links; "spending" = money already spent or paid (a purchase, a bill paid) with an amount.
+- "project": only for a task or an idea: the id of the single best-fitting project, or "none" if no project clearly fits.
+- "topic": only for a reference: the id of the best-fitting reference note, "new" if none fits, otherwise "none". References never go to a project — a place to visit is travel information even when there is a trip project.
+- "new_topic": when "topic" is "new", a short general name for a new reference note (one to three words, e.g. "Travel", "Recipes"), otherwise "".
+- "amount", "currency", "date", "category": only for a spending: the amount as a number; the currency code${cfg.currency ? ` ("${cfg.currency}" if none is given)` : ` ("" if none is given)`}; the date as YYYY-MM-DD (resolve "yesterday" from today; today if none is given); a one-word category such as groceries, transport, home, health, eating-out, bills. Otherwise 0, "", "", "".
+- "priority": "high" = time-sensitive or blocking other work; "low" = nice to have; otherwise "medium".
+- "confidence": 0 to 1, how sure you are about the kind and where it goes.
+- "due": for a task, a deadline as YYYY-MM-DD only if one is given (resolve "next Friday" from today), otherwise "".`;
+}
+function inboxContext(cat, today) {
+  return `Today is ${today}.
+
+Projects (for tasks and ideas):
+${catalogText(cat.projects)}
+
+Reference notes (for references):
+${refsText(cat.refs)}`;
+}
+const INBOX_SYSTEM = "You sort a person's inbox: tasks and ideas into their projects, reference information into their reference notes, and money they spent into their spendings. You answer with a single JSON object and nothing else.";
+function itemMessages(cat, item, today, cfg) {
+  const user = `${inboxContext(cat, today)}
+
+Rules:
+${inboxRules(cfg)}
+
+Item: "${item}"
+
+Answer with JSON like {"kind":"task","project":"P1","topic":"none","new_topic":"","amount":0,"currency":"","date":"","category":"","priority":"medium","confidence":0.8,"due":""}`;
+  return [{ role: "system", content: INBOX_SYSTEM }, { role: "user", content: user }];
+}
+function notesMessages(cat, notes, today, cfg) {
+  const user = `${inboxContext(cat, today)}
+
+Split the notes below into separate, self-contained items — one per distinct action, idea, piece of information or expense. Keep everything the person wrote; don't invent anything. Write in the language of the notes.
+For each item:
+- "text": one short line (at most about 100 characters); for a task, start with a verb.
+- "details": anything else from the notes that belongs to this item (numbers, links, names, context), or "".
+${inboxRules(cfg)}
+
+Notes:
+"""
+${notes}
+"""
+
+Answer with JSON like {"items":[{"text":"Pay the deposit for the winter berth","details":"42 per metre","kind":"task","project":"P1","topic":"none","new_topic":"","amount":0,"currency":"","date":"","category":"","priority":"high","confidence":0.9,"due":"2026-11-20"}]}`;
+  return [{ role: "system", content: INBOX_SYSTEM }, { role: "user", content: user }];
+}
+function itemProps(cat) {
+  return {
+    kind: { type: "string", enum: KINDS },
+    project: { type: "string", enum: [...cat.projects.map((p) => p.id), "none"] },
+    topic: { type: "string", enum: [...cat.refs.map((r) => r.id), "new", "none"] },
+    new_topic: { type: "string" }, amount: { type: "number" }, currency: { type: "string" }, date: { type: "string" }, category: { type: "string" },
+    priority: { type: "string", enum: ["high", "medium", "low"] }, confidence: { type: "number" }, due: { type: "string" },
+  };
+}
+const ITEM_KEYS = ["kind", "project", "topic", "new_topic", "amount", "currency", "date", "category", "priority", "confidence", "due"];
+const ITEM_SCHEMA = (cat) => ({ type: "object", properties: itemProps(cat), required: ITEM_KEYS, additionalProperties: false });
+const NOTES_SCHEMA = (cat) => ({ type: "object", properties: { items: { type: "array", items: { type: "object", properties: Object.assign({ text: { type: "string" }, details: { type: "string" } }, itemProps(cat)), required: ["text", "details", ...ITEM_KEYS], additionalProperties: false } } }, required: ["items"], additionalProperties: false });
+
+/** Remove the indentation the lines have in common (sub-bullets of an item → top level). */
+function outdent(lines) {
+  const ls = lines.filter((l) => l.trim() !== "");
+  if (!ls.length) return [];
+  const w = Math.min(...ls.map((l) => l.match(/^[ \t]*/)[0].length));
+  return ls.map((l) => l.slice(w));
+}
+const isIso = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
+/** A model answer → a record { kind, text, details[], dest, newTopic, prio, conf, due, spend, created }. */
+function normalizeRecord(x, cat, cfg, today) {
+  x = x || {};
+  const kind = KINDS.includes(x.kind) ? x.kind : "task";
+  const find = (list, v) => { v = String(v || "").trim().toLowerCase(); return v && v !== "none" && v !== "new" ? list.find((p) => p.id.toLowerCase() === v) || list.find((p) => p.name.toLowerCase() === v) || null : null; };
+  let conf = Number(x.confidence);
+  if (isNaN(conf)) conf = 0.5;
+  if (conf > 1) conf /= 100;
+  const r = { kind, text: oneLine(x.text), created: today,
+    details: String(x.details || "").split(/\r?\n/).map((l) => l.trim().replace(/^[-*]\s+/, "")).filter(Boolean).map((l) => `- ${l.replace(/[\[\]]/g, "")}`),
+    prio: ["high", "medium", "low"].includes(x.priority) ? x.priority : "medium", conf: clamp(conf, 0, 1),
+    due: isIso(x.due) ? x.due : null, dest: null, newTopic: "", spend: null };
+  if (kind === "task" || kind === "idea") { const p = find(cat.projects, x.project); if (p) r.dest = { path: p.path, name: p.name }; }
+  else if (kind === "reference") {
+    const t = find(cat.refs, x.topic) || find(cat.refs, x.new_topic);
+    if (t) r.dest = { path: t.path, name: t.name };
+    else { const n = sanitizeName(oneLine(x.new_topic)); if (n && !/^(none|new)$/i.test(n)) r.newTopic = n.charAt(0).toUpperCase() + n.slice(1); }
+  } else {
+    const a = Number(String(x.amount ?? "").replace(",", "."));
+    r.spend = { amount: isFinite(a) && a > 0 ? Math.round(a * 100) / 100 : null, currency: oneLine(x.currency || cfg.currency || "").toUpperCase(), date: isIso(x.date) ? x.date : today, category: oneLine(x.category).toLowerCase().replace(/\s+/g, "-") };
+  }
+  return r;
+}
+/** Everything in the inbox to classify: queue items (one model call each) and the free text (one call per chunk). */
+function inboxJobs(lines, today) {
+  const jobs = [], sources = [];
+  for (const it of parseItems(lines)) {
+    if (!it.task || it.parent || it.status !== " " || !it.text) continue;
+    const end = blockEnd(lines, it);
+    const sub = outdent(lines.slice(it.line + 1, end));
+    const body = ["to", "kind", "conf"].reduce((l, k) => setField(l, k, null), it.body).trim();
+    sources.push({ block: true, lines: lines.slice(it.line, end) });
+    jobs.push({ type: "item", text: it.desc + (sub.length ? ` — ${sub.map((l) => l.replace(/^\s*[-*]\s+/, "")).join("; ")}` : ""), body, desc: stripFields(splitMeta(body).head), sub, created: getDate(it.raw, "created") || today });
+  }
+  for (const c of inboxFree(lines).chunks) {
+    sources.push({ block: false, lines: c.idx.map((i) => lines[i]) });
+    jobs.push({ type: "notes", text: c.text });
+  }
+  return { jobs, sources };
+}
+/** Model answers (parsed JSON or null when there was none) → records. Without an answer an item stays a task with no destination. */
+function jobRecords(jobs, answers, cat, cfg, today) {
+  const out = [];
+  jobs.forEach((j, k) => {
+    const a = answers[k];
+    if (j.type === "item") {
+      const r = a ? normalizeRecord(a, cat, cfg, today) : { kind: "task", dest: null, newTopic: "", prio: "medium", conf: 0, due: null, spend: null };
+      r.text = r.kind === "task" ? j.body : j.desc;
+      r.details = j.sub; r.created = j.created;
+      if (r.kind === "spending" && r.spend) r.text = j.desc;
+      out.push(r);
+    } else if (a) {
+      const items = Array.isArray(a) ? a : Array.isArray(a.items) ? a.items : [];
+      for (const x of items) { const r = normalizeRecord(x, cat, cfg, today); if (r.text) out.push(r); }
+    } else {
+      const ls = j.text.split("\n").filter((l) => l.trim());
+      out.push({ kind: "reference", text: oneLine(ls[0]), details: ls.slice(1).map((l) => `- ${l.trim().replace(/^[-*]\s+/, "")}`), dest: null, newTopic: "", prio: "medium", conf: 0, due: null, spend: null, created: today });
+    }
+  });
+  return out;
+}
+function reviewLines(app, cfg, r) {
+  let line = `- ${KIND_ICON[r.kind]} ${r.text}`;
+  if (r.kind === "task") {
+    if (r.due && !getDate(line, "due")) line = setDate(line, "due", r.due);
+    if (r.prio !== "medium" && prioOf(line) === "normal") line = setPrio(line, r.prio);
+  }
+  if (r.kind === "spending") {
+    const sp = r.spend || {};
+    line = setField(line, "amount", sp.amount === null || sp.amount === undefined ? "?" : String(sp.amount));
+    line = setField(line, "currency", sp.currency || null);
+    line = setField(line, "date", sp.date || null);
+    line = setField(line, "category", sp.category || null);
+  } else {
+    line = setField(line, "to", r.dest ? linkTo(app, r.dest.path, REVIEW_PATH, r.dest.name) : r.newTopic ? `[[${r.newTopic}]]` : "none");
+    if (!r.dest && r.newTopic) line = setField(line, "new", "reference note");
+  }
+  const unsure = r.kind === "spending" ? !r.spend || r.spend.amount === null || r.conf < cfg.llm_flag_below : (r.dest || r.newTopic) && r.conf < cfg.llm_flag_below;
+  if (unsure) line = setField(line, "check", "unsure");
+  return [withCreated(line, r.created), ...(r.details || []).map((d) => `\t${d}`)];
+}
+const REVIEW_BLOCK = `\`\`\`dataviewjs
+await dv.view("${VIEW_PATH}", {mode: "classified"})
+\`\`\``;
+function reviewNote(app, cfg, records, stamp) {
+  let s = `---
+type: classified-inbox
+classified: ${stamp}
+---
+# Classified inbox
+
+${REVIEW_BLOCK}
+
+> [!info] Check before applying — your inbox isn't changed until you press Apply
+> Every line says where it goes in \`[to:: …]\`. Change it to any project or reference note (e.g. \`[to:: [[Travel]]]\`; a name that doesn't exist yet becomes a new note in \`${cfg.reference_folder}\`), move a line to another section to change what it is, edit the text, or delete lines you don't want. \`[check:: unsure]\` = the model wasn't sure. Lines with \`[to:: none]\` are asked about when you apply. Add \`[week:: ${weekId(getMoment()())}]\` to a task to plan it for that week.
+`;
+  for (const k of KINDS) {
+    const rs = records.filter((r) => r.kind === k);
+    s += `\n## ${REVIEW_SECS[k]}${k === "spending" ? "" : ""}\n`;
+    for (const r of rs) s += reviewLines(app, cfg, r).join("\n") + "\n";
+  }
+  return s;
+}
+const EMPTY_REVIEW = `---
+type: classified-inbox
+---
+# Classified inbox
+
+${REVIEW_BLOCK}
+`;
+async function writeFile(app, path, content) {
+  const f = app.vault.getAbstractFileByPath(path);
+  if (f) await app.vault.modify(f, content); else await createFile(app, path, content);
+}
+async function loadSnap(app) {
+  try { return (await aiExists(app, REVIEW_SNAP)) ? JSON.parse(await app.vault.adapter.read(REVIEW_SNAP)) : null; } catch (e) { return null; }
+}
+async function writeReview(app, cfg, records, sources, stamp) {
+  if (!(await aiExists(app, AI_DIR))) await app.vault.adapter.mkdir(AI_DIR);
+  await app.vault.adapter.write(REVIEW_SNAP, JSON.stringify({ created: stamp, sources }, null, 1));
+  await writeFile(app, REVIEW_PATH, reviewNote(app, cfg, records, stamp));
+}
+const recSummary = (rs) => KINDS.map((k) => [k, rs.filter((r) => r.kind === k).length]).filter(([, n]) => n).map(([k, n]) => `${n} ${KIND_NAME[k]}${n > 1 ? "s" : ""}`).join(", ");
+
+/* ---- iPhone: Apple's on-device model through the Shortcuts app ----
+ * 1. We write Tracker/AI/request.json  { prompts: [...], jobs, sources, ids: {P1: path, R1: path} }
+ * 2. We open the shortcut. It runs "Use Model (On-Device)" on each prompt and saves the answers,
+ *    joined by SHORTCUT_SEP, to Tracker/AI/response.txt, then switches back to Obsidian.
+ * 3. Next time Process inbox runs, we read the answers and write the Classified inbox.   */
+async function startShortcut(env, cfg, g, cat) {
+  const { app } = env;
+  if (!(await aiExists(app, AI_DIR))) await app.vault.adapter.mkdir(AI_DIR);
+  await aiRemove(app, AI_RES);
+  const today = env.moment().format("YYYY-MM-DD");
+  const prompts = g.jobs.map((j) => {
+    const [sys, user] = j.type === "item" ? itemMessages(cat, j.text, today, cfg) : notesMessages(cat, j.text, today, cfg);
+    return `${sys.content}\n\n${user.content}\n\nReply with the JSON object only.`;
+  });
+  const ids = Object.fromEntries([...cat.projects, ...cat.refs].map((p) => [p.id, p.path]));
+  await app.vault.adapter.write(AI_REQ, JSON.stringify({ created: env.moment().format(), prompts, jobs: g.jobs, sources: g.sources, ids }, null, 1));
+  env.notice(`Sorting your inbox with the on-device model in Shortcuts… When it brings you back, tap Process inbox again.`, 8000);
+  env.openUrl(`shortcuts://run-shortcut?name=${encodeURIComponent(cfg.llm_shortcut)}`);
+  throw new Handoff();
+}
+/** Turn the shortcut's answers into the Classified inbox. Returns {pending, records}. */
+async function applyShortcutResults(env, cfg) {
+  const { app } = env;
+  if (!(await aiExists(app, AI_REQ))) return { pending: false, records: 0 };
+  if (!(await aiExists(app, AI_RES))) return { pending: true, records: 0 };
+  const req = JSON.parse(await app.vault.adapter.read(AI_REQ));
+  const parts = (await app.vault.adapter.read(AI_RES)).split(SHORTCUT_SEP);
+  const ids = req.ids || {};
+  const pick = (list) => list.filter((p) => Object.values(ids).includes(p.path)).map((p) => Object.assign({}, p, { id: Object.keys(ids).find((k) => ids[k] === p.path) }));
+  const cat = { projects: pick(listProjects(app, cfg)), refs: pick(referenceNotes(app, cfg)) };
+  const answers = (req.jobs || []).map((j, k) => { try { return extractJson(stripThink(parts[k] || "")); } catch (e) { return null; } });
+  const today = env.moment().format("YYYY-MM-DD");
+  const records = jobRecords(req.jobs || [], answers, cat, cfg, today);
+  await writeReview(app, cfg, records, req.sources || [], env.moment().format("YYYY-MM-DD HH:mm"));
+  await aiRemove(app, AI_REQ); await aiRemove(app, AI_RES);
+  return { pending: false, records: records.length };
 }
 
+/** Classify the whole inbox into the Classified inbox note. noModel: sort nothing, just list the items for you to place. Returns how many records. */
+async function classifyInbox(env, cfg, { noModel = false } = {}) {
+  const { app } = env;
+  const today = env.moment().format("YYYY-MM-DD");
+  const lines = (await readPath(app, cfg.inbox)).split("\n");
+  const g = inboxJobs(lines, today);
+  if (!g.jobs.length) { env.notice("Inbox is empty 🎉"); return 0; }
+  const cat = await inboxCatalog(app, cfg);
+  const viaShortcut = env.isMobile && String(cfg.llm_mobile).toLowerCase() === "shortcut";
+  if (!noModel && viaShortcut) await startShortcut(env, cfg, g, cat);
+  if (!noModel) { try { llmBase(env, cfg); } catch (e) { env.notice(`${e.message} — listing the items without sorting them.`, 9000); noModel = true; } }
+  const answers = [];
+  for (const [k, j] of g.jobs.entries()) {
+    if (noModel) { answers.push(null); continue; }
+    env.notice(j.type === "item" ? `Classifying ${k + 1}/${g.jobs.length}: ${j.text.slice(0, 40)}` : `Reading your notes (${k + 1}/${g.jobs.length})…`, 2500);
+    try {
+      answers.push(extractJson(await llmChat(env, cfg, j.type === "item" ? itemMessages(cat, j.text, today, cfg) : notesMessages(cat, j.text, today, cfg), j.type === "item" ? ITEM_SCHEMA(cat) : NOTES_SCHEMA(cat))));
+    } catch (e) {
+      if (/can't reach/.test(e.message)) { env.notice(`${e.message} — listing the rest without sorting.`, 9000); noModel = true; }
+      answers.push(null);
+    }
+  }
+  const records = jobRecords(g.jobs, answers, cat, cfg, today);
+  await writeReview(app, cfg, records, g.sources, env.moment().format("YYYY-MM-DD HH:mm"));
+  const open = records.filter((r) => r.kind !== "spending" && !r.dest && !r.newTopic).length;
+  env.notice(`Classified inbox: ${recSummary(records)}${open ? ` · ${open} without a destination` : ""}. Check it, then press Apply.`, 8000);
+  return records.length;
+}
+
+/* ---- reading the reviewed note back */
+function parseReview(content) {
+  const ls = String(content || "").split("\n"), out = [];
+  for (const k of KINDS) {
+    const s = findSection(ls, REVIEW_SECS[k]);
+    if (!s) continue;
+    for (const it of parseItems(ls, s.start, s.end)) {
+      if (it.parent) continue;
+      const sub = outdent(ls.slice(it.line + 1, blockEnd(ls, it)));
+      const body = (it.task ? it.body : it.body.replace(/^(?:☐|💡|📎|💶)️?\s*/u, "")).trim();
+      if (!stripFields(splitMeta(body).head)) continue;
+      out.push({ kind: k, body, fields: parseFields(body), sub });
+    }
+  }
+  return out;
+}
+/** Where a reviewed record goes: {type: project | note | newref | finance, path, name} or null (ask). */
+function resolveDest(app, cfg, rec, projects) {
+  if (rec.kind === "spending") return { type: "finance", path: cfg.finance_file, name: linkLabel(cfg.finance_file).replace(/\.md$/, "") };
+  const v = rec.fields.to;
+  if (!v || /^none$/i.test(linkLabel(v))) return null;
+  const m = String(v).match(/\[\[([^\]|#]+)/), target = (m ? m[1] : v).trim();
+  const f = app.metadataCache.getFirstLinkpathDest(target, REVIEW_PATH) || app.vault.getAbstractFileByPath(/\.md$/.test(target) ? target : `${target}.md`);
+  const pp = f ? f.path : resolveProject(app, v, REVIEW_PATH, projects);
+  if (pp) { const p = projects.find((x) => x.path === pp); return p ? { type: "project", path: p.path, name: p.name } : { type: "note", path: pp, name: pp.split("/").pop().replace(/\.md$/, "") }; }
+  if (rec.kind !== "reference") return null; // a task or idea with a name that doesn't exist: ask
+  const name = sanitizeName(target.split("/").pop());
+  return name ? { type: "newref", path: `${String(cfg.reference_folder || "References").replace(/\/+$/, "")}/${name}.md`, name } : null;
+}
+const destText = (d) => (!d ? "no destination" : d.type === "project" ? `→ ${d.name}` : d.type === "newref" ? `→ ${d.name} (new reference note)` : d.type === "finance" ? `→ ${d.name}` : d.type === "leave" ? "⏸ stays in the inbox" : d.type === "delete" ? "🗑 deleted" : `→ ${d.name}`);
+const cleanRec = (body) => ["to", "check", "new", "kind", "conf"].reduce((l, k) => setField(l, k, null), body).replace(/\s{2,}/g, " ").trim();
+/** The lines a record becomes at its destination. */
+function filedLines(cfg, rec, dest, today) {
+  const clean = cleanRec(rec.body), created = getDate(clean, "created") || today;
+  const sub = rec.sub.map((l) => `\t${l}`);
+  if (rec.kind === "spending") return [`- 💶 ${clean}`, ...sub];
+  if (rec.kind === "task") return [newTask(cfg, `- [ ] ${clean}`, created), ...sub];
+  const desc = stripFields(splitMeta(clean).head);
+  return [`- ${rec.kind === "idea" ? "💡" : "📎"} ${desc} (${created})`, ...sub];
+}
+
+/** Ask where the records without a destination go. Every menu has ← Back; nothing is written until the end. Esc cancels. */
+async function askDestinations(env, cfg, pending, projects, refs) {
+  const live = projects.filter((p) => !p.routine && liveStatus(p)).sort((a, b) => projPrioRank(a) - projPrioRank(b) || a.name.localeCompare(b.name));
+  const BACK = "__back";
+  let i = 0;
+  while (i < pending.length) {
+    const r = pending[i];
+    const head = `(${i + 1}/${pending.length}) ${KIND_ICON[r.kind]} “${stripFields(splitMeta(cleanRec(r.body)).head).slice(0, 70)}”${r.dest ? ` — now ${destText(r.dest)}` : ""} · Esc cancels, nothing is applied yet`;
+    const top = r.kind === "reference" ? [["📚 Reference note…", "ref"], ["＋ New reference note…", "newref"], ["→ Project…", "project"]] : [["→ Project…", "project"], ["📚 Reference note…", "ref"], ["＋ New reference note…", "newref"]];
+    top.push([`✎ Change type (now ${KIND_NAME[r.kind]})…`, "kind"], ["⏸ Leave in the inbox", "leave"], ["🗑 Delete", "delete"]);
+    if (i > 0) top.push(["← Back to the previous item", "prev"]);
+    const c = await ask(env, top.map((o) => o[0]), top.map((o) => o[1]), head);
+    if (c === "prev") { i--; continue; }
+    if (c === "leave" || c === "delete") { r.dest = { type: c }; i++; continue; }
+    if (c === "kind") {
+      const ks = ["task", "idea", "reference"].filter((k) => k !== r.kind);
+      const k = await env.suggest([...ks.map((k) => `${KIND_ICON[k]} ${KIND_NAME[k]}`), "← Back"], [...ks, BACK], `What is “${stripFields(splitMeta(cleanRec(r.body)).head).slice(0, 60)}”?`);
+      if (k && k !== BACK) r.kind = k;
+      continue; // same item again, with the new type
+    }
+    if (c === "project") {
+      const p = await env.suggest([...live.map((x) => `${x.name}${x.status !== "active" ? ` (${x.status})` : ""}`), "← Back"], [...live, BACK], `${KIND_ICON[r.kind]} To which project?`);
+      if (!p || p === BACK) continue;
+      r.dest = { type: "project", path: p.path, name: p.name };
+    } else if (c === "ref") {
+      if (!refs.length) { env.notice(`No reference notes in ${cfg.reference_folder} yet — use ＋ New reference note.`, 5000); continue; }
+      const n = await env.suggest([...refs.map((x) => x.name), "← Back"], [...refs, BACK], "📚 To which reference note?");
+      if (!n || n === BACK) continue;
+      r.dest = { type: "note", path: n.path, name: n.name };
+    } else if (c === "newref") {
+      const name = sanitizeName(oneLine(await env.prompt(`＋ Name of the new reference note in ${cfg.reference_folder} (empty = back)`, "")));
+      if (!name) continue;
+      const ex = refs.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      r.dest = ex ? { type: "note", path: ex.path, name: ex.name } : { type: "newref", path: `${String(cfg.reference_folder).replace(/\/+$/, "")}/${name}.md`, name };
+    }
+    i++;
+  }
+}
+
+const FINANCE_TEMPLATE = (name) => `---
+type: finance
+---
+# ${name}
+
+Spendings collected from the inbox. Move the ones you've dealt with out of **Unprocessed** (into your budget, a spreadsheet…) and tick the task.
+
+## To do
+
+## Unprocessed
+`;
+/** Add spending lines to the finance file and keep exactly one open task to process them. */
+async function addSpendings(app, cfg, lines, today) {
+  const path = cfg.finance_file;
+  const name = path.split("/").pop().replace(/\.md$/, "");
+  if (!app.vault.getAbstractFileByPath(path)) await createFile(app, path, FINANCE_TEMPLATE(name));
+  let count = 0;
+  await editLines(app, path, (ls) => {
+    insertIntoSection(ls, "Unprocessed", lines);
+    const s = findSection(ls, "Unprocessed");
+    count = parseItems(ls, s.start, s.end).filter((x) => !x.parent && !x.task).length;
+  });
+  const projects = listProjects(app, cfg);
+  const pp = cfg.finance_project ? resolveProject(app, cfg.finance_project, CONFIG_PATH, projects) : null;
+  const where = pp || path;
+  const text = `Process ${count} new spending(s) in ${linkTo(app, path, where, name)}`;
+  await editLines(app, where, (ls) => {
+    const k = ls.findIndex((l) => /^\s*[-*+]\s+\[[ /]\]/.test(l) && l.includes("[spendings:: inbox]"));
+    if (k >= 0) { ls[k] = ls[k].replace(/Process \d+ new spending\(s\) in \[\[[^\]]*\]\]/, text); return; }
+    const line = setDate(newTask(cfg, `- [ ] ${text} [spendings:: inbox]`, today), "scheduled", today);
+    if (pp) insertIntoProjectSection(ls, "Backlog", [line]); else insertIntoSection(ls, "To do", [line]);
+  });
+  return { count, where };
+}
+function appendLines(ls, lines) {
+  while (ls.length && ls[ls.length - 1].trim() === "") ls.pop();
+  const last = ls[ls.length - 1] || "";
+  if (ls.length && !LIST_RE.test(last) && !/^\s/.test(last)) ls.push("");
+  ls.push(...lines, "");
+}
+function removeSources(ls, sources) {
+  let missed = 0;
+  for (const s of sources) {
+    if (s.block) {
+      const n = s.lines.length;
+      let at = -1;
+      for (let i = 0; i + n <= ls.length && at < 0; i++) if (s.lines.every((l, k) => ls[i + k] === l)) at = i;
+      if (at >= 0) ls.splice(at, n); else missed++;
+    } else for (const l of s.lines) { const i = ls.indexOf(l); if (i >= 0) ls.splice(i, 1); else missed++; }
+  }
+  // collapse the blank lines left behind (not inside the frontmatter)
+  for (let i = ls.length - 1; i > 0; i--) if (ls[i].trim() === "" && ls[i - 1].trim() === "") ls.splice(i, 1);
+  return missed;
+}
+
+async function cmdApplyInbox(env) {
+  const { app } = env, cfg = getConfig(app);
+  const snap = await loadSnap(app);
+  const content = await readPath(app, REVIEW_PATH);
+  if (!snap || content === null) { env.notice("Nothing to apply — run Process inbox first."); return; }
+  const today = env.moment().format("YYYY-MM-DD");
+  const projects = listProjects(app, cfg), refs = referenceNotes(app, cfg);
+  const recs = parseReview(content);
+  for (const r of recs) r.dest = resolveDest(app, cfg, r, projects);
+  const pending = recs.filter((r) => !r.dest);
+  if (pending.length) await askDestinations(env, cfg, pending, projects, refs);
+  // last check, with a way back to the questions
+  for (;;) {
+    const by = (t) => recs.filter((r) => r.dest && r.dest.type === t).length;
+    const sum = [[by("project"), "to projects"], [by("note") + by("newref"), "to reference notes"], [by("finance"), "spendings"], [by("leave"), "left in the inbox"], [by("delete"), "deleted"]].filter(([n]) => n).map(([n, l]) => `${n} ${l}`).join(" · ");
+    const opts = [["✔ Apply", "apply"]];
+    if (pending.length) opts.push(["← Back to the questions", "back"]);
+    opts.push(["✖ Cancel — change nothing", "cancel"]);
+    const c = await ask(env, opts.map((o) => o[0]), opts.map((o) => o[1]), `Apply: ${sum || "nothing"}?`);
+    if (c === "cancel") throw new Cancelled();
+    if (c === "apply") break;
+    await askDestinations(env, cfg, pending, projects, refs);
+  }
+  // 1. destinations
+  const groups = new Map();
+  const add = (d, section, lines) => { if (!groups.has(d.path)) groups.set(d.path, { d, secs: new Map() }); const g = groups.get(d.path).secs; if (!g.has(section)) g.set(section, []); g.get(section).push(...lines); };
+  const spend = [], leftover = [];
+  for (const r of recs) {
+    const d = r.dest;
+    if (d.type === "delete") continue;
+    if (d.type === "leave") { const clean = cleanRec(r.body); leftover.push(/^\[.\]/.test(clean) ? `- ${clean}` : `- [ ] ${clean}`, ...r.sub.map((l) => `\t${l}`)); continue; }
+    const lines = filedLines(cfg, r, d, today);
+    if (d.type === "finance") { spend.push(...lines); continue; }
+    if (d.type === "project") add(d, r.kind === "task" ? (parseFields(r.body).week ? PLANNED_SEC : "Backlog") : "Notes & ideas", lines);
+    else add(d, "", lines);
+  }
+  for (const { d, secs } of groups.values()) {
+    if (d.type === "newref" && !app.vault.getAbstractFileByPath(d.path)) await createFile(app, d.path, `---\ntype: reference\ndescription: ""\n---\n# ${d.name}\n`);
+    await editLines(app, d.path, (ls) => { for (const [sec, lines] of secs) { if (sec) insertIntoProjectSection(ls, sec, lines); else appendLines(ls, lines); } });
+  }
+  let fin = null;
+  if (spend.length) fin = await addSpendings(app, cfg, spend, today);
+  // 2. the inbox: archive and remove what was classified, put back what you left
+  const stamp = env.moment().format("YYYY-MM-DD HH:mm");
+  let missed = 0;
+  await editLines(app, cfg.inbox, (ls) => { missed = removeSources(ls, snap.sources || []); if (leftover.length) insertIntoSection(ls, "Queue", leftover); });
+  const filed = recs.filter((r) => !["leave", "delete"].includes(r.dest.type));
+  const entry = `\n## ${stamp}\n\n${(snap.sources || []).map((s) => s.lines.join("\n")).join("\n")}\n\n→ ${filed.length} filed: ${filed.map((r) => `${KIND_ICON[r.kind]} ${stripFields(splitMeta(cleanRec(r.body)).head)} ${destText(r.dest)}`).join(" · ")}\n`;
+  const af = app.vault.getAbstractFileByPath(INBOX_ARCHIVE);
+  if (af) await app.vault.modify(af, (await app.vault.read(af)).replace(/\s*$/, "\n") + entry);
+  else await createFile(app, INBOX_ARCHIVE, `# Inbox archive\n\nWhat the inbox held, as you wrote it, each time Apply inbox filed it.\n${entry}`);
+  // 3. done: empty review
+  await writeFile(app, REVIEW_PATH, EMPTY_REVIEW);
+  await aiRemove(app, REVIEW_SNAP);
+  const by = (t) => recs.filter((r) => r.dest.type === t).length;
+  env.notice(`Inbox applied: ${by("project")} to projects · ${by("note") + by("newref")} to reference notes${fin ? ` · ${spend.filter((l) => !/^\t/.test(l)).length} spending(s) → “Process ${fin.count} new spending(s)” task` : ""}${by("leave") ? ` · ${by("leave")} left in the inbox` : ""}${missed ? ` · ${missed} inbox line(s) changed after classifying were left in place` : ""}`, 9000);
+}
+
+/** Process inbox: classify into the Classified inbox (or, when one is waiting, apply / open / redo it). */
 async function cmdProcess(env) {
   const { app } = env, cfg = getConfig(app);
-  try { await cmdClassify(env, { quiet: true }); }
-  catch (e) { if (e instanceof Cancelled || e instanceof Handoff) throw e; env.notice(`Classifier unavailable (${e.message}) — continuing manually.`, 9000); }
-  const projects = listProjects(app, cfg).filter((p) => !["done", "archived", "dropped"].includes(p.status));
-  const ilines = (await readPath(app, cfg.inbox)).split("\n");
-  const items = inboxItems(ilines), freeLeft = inboxFree(ilines).idx.length;
-  if (!items.length) { env.notice(freeLeft ? `Inbox: ${freeLeft} line(s) of notes need the local model to be split into items — nothing else to file.` : "Inbox is empty 🎉", 8000); return; }
-  const curId = weekId(env.moment());
-  const stats = { filed: 0, auto: 0, kept: 0, deleted: 0 };
-  const label = (p) => `${p.name}${p.status !== "active" ? ` (${p.status})` : ""}`;
-  for (const it of items) {
-    const f = it.fields;
-    const sugPath = f.to && f.to !== "none" ? resolveProject(app, f.to, cfg.inbox, projects) : null;
-    const sug = projects.find((p) => p.path === sugPath);
-    const kind = ["task", "idea", "reference"].includes(f.kind) ? f.kind : "task";
-    const conf = parseFloat(f.conf);
-    if (sug && !isNaN(conf) && conf >= cfg.llm_auto_file_confidence) {
-      await fileItem(app, cfg, it.raw, { projectPath: sug.path, kind });
-      stats.filed++; stats.auto++;
-      continue;
+  await ensureInbox(app, cfg);
+  let noModel = false;
+  if (env.isMobile && String(cfg.llm_mobile).toLowerCase() === "shortcut") {
+    const st = await applyShortcutResults(env, cfg);
+    if (st.records) { env.notice(`Classified inbox: ${st.records} item(s) from the on-device model. Check them, then press Apply.`, 8000); await env.open(REVIEW_PATH); return; }
+    if (st.pending) {
+      const c = await ask(env, ["↻ Run the on-device model again", "Continue without AI"], ["run", "skip"], "No answers from the shortcut yet");
+      await aiRemove(app, AI_REQ);
+      if (c === "skip") noModel = true;
     }
-    const opts = [];
-    const pr = prioOf(it.raw);
-    if (sug) opts.push([`✓ ${sug.name} · ${kind}${pr !== "normal" ? " · " + pr : ""}${isNaN(conf) ? "" : ` · ${Math.round(conf * 100)}%`}`, { a: "file", p: sug, kind }]);
-    if (sug && kind === "task") opts.push([`✓ ${sug.name} · as idea`, { a: "file", p: sug, kind: "idea" }]);
-    if (sug && kind !== "task") opts.push([`✓ ${sug.name} · as task`, { a: "file", p: sug, kind: "task" }]);
-    opts.push(["→ Another project…", { a: "other", kind }]);
-    opts.push([sug ? `★ ${sug.name} · plan for this week (${shortWeek(curId)})` : `★ Plan for this week (${shortWeek(curId)})…`, { a: "plan", p: sug }]);
-    opts.push(["⏸ Keep in inbox", { a: "keep" }], ["🗑 Delete", { a: "delete" }]);
-    const choice = await ask(env, opts.map((o) => o[0]), opts.map((o) => o[1]), `“${it.desc}”`);
-    if (choice.a === "file") { await fileItem(app, cfg, it.raw, { projectPath: choice.p.path, kind: choice.kind }); stats.filed++; }
-    else if (choice.a === "other") {
-      const p = await ask(env, projects.map(label), projects, `File “${it.desc}” to…`);
-      const k = await ask(env, ["Task (backlog)", "Idea", "Reference"], ["task", "idea", "reference"], "As…");
-      await fileItem(app, cfg, it.raw, { projectPath: p.path, kind: k });
-      stats.filed++;
-    } else if (choice.a === "plan") {
-      const p = choice.p || await ask(env, projects.map(label), projects, `Plan “${it.desc}” for this week in…`);
-      await fileItem(app, cfg, it.raw, { projectPath: p.path, kind: "task", planWeek: curId });
-      stats.filed++;
-    } else if (choice.a === "delete") { await deleteInboxLine(app, cfg, it.raw); stats.deleted++; }
-    else stats.kept++;
   }
-  env.notice(`Inbox: filed ${stats.filed}${stats.auto ? ` (${stats.auto} automatically)` : ""}, kept ${stats.kept}, deleted ${stats.deleted}${freeLeft ? ` · ${freeLeft} line(s) of notes left for the model` : ""}`);
+  if (await loadSnap(app)) {
+    const c = await ask(env, ["✔ Apply the reviewed items", "👀 Open the Classified inbox", "↻ Classify again (replaces the review)"], ["apply", "open", "again"], "Your classified inbox is waiting for review");
+    if (c === "apply") return cmdApplyInbox(env);
+    if (c === "open") return env.open(REVIEW_PATH);
+  }
+  if (await classifyInbox(env, cfg, { noModel })) await env.open(REVIEW_PATH);
+}
+async function cmdClassify(env) {
+  const { app } = env, cfg = getConfig(app);
+  await ensureInbox(app, cfg);
+  if (await classifyInbox(env, cfg)) await env.open(REVIEW_PATH);
+}
+
+/** The summary on top of Tracker/Classified inbox. */
+async function renderClassified(app) {
+  const cfg = getConfig(app);
+  const snap = await loadSnap(app);
+  let h = `<div class="pt">`;
+  if (!snap) return h + `<div class="pt-empty">Nothing to review. <b>Process inbox</b> sorts your inbox into this note, and your inbox stays as it is until you apply it.</div>${buttons([["Process inbox", "Process inbox", true]])}</div>`;
+  const projects = listProjects(app, cfg);
+  const recs = parseReview(await readPath(app, REVIEW_PATH));
+  for (const r of recs) r.dest = resolveDest(app, cfg, r, projects);
+  const n = (f) => recs.filter(f).length;
+  const newRefs = [...new Set(recs.filter((r) => r.dest && r.dest.type === "newref").map((r) => r.dest.name))];
+  h += `<div class="pt-kpis">${kpi("To projects", n((r) => r.dest && r.dest.type === "project"))}${kpi("To reference notes", n((r) => r.dest && ["note", "newref"].includes(r.dest.type)), newRefs.length ? `new: ${esc(newRefs.join(", "))}` : "")}${kpi("Spendings", n((r) => r.kind === "spending"), `→ ${esc(cfg.finance_file)}`)}${kpi("No destination", n((r) => !r.dest), "asked when you apply")}${kpi("Unsure", n((r) => r.fields.check), "[check:: unsure]")}</div>`;
+  h += `<div class="pt-muted pt-hint">Classified ${esc(snap.created || "")} from ${(snap.sources || []).length} inbox entr${(snap.sources || []).length === 1 ? "y" : "ies"}. Anything added to the inbox since then stays there.</div>`;
+  return h + buttons([["Apply inbox", "Apply inbox", true], ["Classify again", "Process inbox"]]) + `</div>`;
+}
+
+/* ------------------------------------------------------------------ project review (LLM): tasks vs goals, duplicates
+ * On a project page, the local model compares the open tasks (Planned, Unplanned, Backlog) with the project's
+ * objective and this / next week's goals: which tasks are missing to reach them, and which tasks are the same work.
+ * Suggestions are kept in Tracker/AI/analysis.json until you add / merge / dismiss them. */
+const ANALYSIS_STORE = `${AI_DIR}/analysis.json`;
+const TASK_SECS = [PLANNED_SEC, UNPLANNED_SEC, "Backlog"];
+async function loadAnalysis(app) {
+  try { return (await aiExists(app, ANALYSIS_STORE)) ? JSON.parse(await app.vault.adapter.read(ANALYSIS_STORE)) || {} : {}; } catch (e) { return {}; }
+}
+async function saveAnalysis(app, store) {
+  if (!(await aiExists(app, AI_DIR))) await app.vault.adapter.mkdir(AI_DIR);
+  await app.vault.adapter.write(ANALYSIS_STORE, JSON.stringify(store, null, 1));
+}
+/** Open top-level tasks of a project note, by section. */
+function projectTasks(lines) {
+  const out = [];
+  for (const sec of TASK_SECS) {
+    const s = findSection(lines, sec);
+    if (!s) continue;
+    for (const it of parseItems(lines, s.start, s.end)) if (it.task && !it.parent && isOpen(it) && it.desc) out.push({ raw: it.raw, desc: it.desc, section: sec, week: weekIds(it.fields.week)[0] || null, due: getDate(it.raw, "due") });
+  }
+  return out;
+}
+function projectGoals(d, p) {
+  const gs = [];
+  if (p.objective) gs.push({ id: "G1", text: p.objective, label: "Objective" });
+  for (const [wid, label] of [[d.curId, "This week"], [shiftWeek(d.curId, 1), "Next week"]]) {
+    const w = d.weekMap.get(wid), g = w ? w.goals.find((x) => x.projectPath === p.path) : null;
+    if (g) gs.push({ id: `G${gs.length + 1}`, text: g.text, label: `${label} (${wid})`, week: wid });
+  }
+  return gs;
+}
+function analysisHash(tasks, goals) {
+  const str = tasks.map((t) => t.raw).join("\n") + "\u0001" + goals.map((g) => g.text).join("\n");
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+function analysisMessages(p, goals, tasks, today) {
+  const system = "You review a project in a personal planning system: do its tasks lead to its goals, and are some tasks duplicates of each other. You answer with one JSON object and nothing else.";
+  const user = `Today is ${today}.
+Project: ${p.name}${p.description ? ` — ${p.description}` : ""}
+
+Goals:
+${goals.length ? goals.map((g) => `${g.id} (${g.label}): ${g.text}`).join("\n") : "(no goals set)"}
+
+Open tasks:
+${tasks.length ? tasks.map((t, i) => `T${i + 1} [${t.section}${t.week ? `, ${t.week}` : ""}${t.due ? `, due ${t.due}` : ""}]: ${t.desc}`).join("\n") : "(none)"}
+
+Answer:
+- "summary": one or two sentences: how well the tasks cover the goals, and the biggest gap.
+- "missing": up to 5 concrete tasks that are clearly needed to reach a goal but are not in the list (not just reworded existing tasks). Each: "text" (a short task starting with a verb, in the language of the tasks), "goal" (the goal id it serves), "why" (a few words).
+- "duplicates": groups of tasks that describe the same work. Each: "tasks" (two or more task ids), "merged" (one task text that covers all of them), "why" (a few words). Only real duplicates — related but different steps are not duplicates. [] if there are none.
+
+Answer with JSON like {"summary":"…","missing":[{"text":"Book the haul-out","goal":"G2","why":"needed before winter"}],"duplicates":[{"tasks":["T2","T5"],"merged":"…","why":"same call"}]}`;
+  return [{ role: "system", content: system }, { role: "user", content: user }];
+}
+const ANALYSIS_SCHEMA = (gids, tids) => ({ type: "object", properties: {
+  summary: { type: "string" },
+  missing: { type: "array", items: { type: "object", properties: { text: { type: "string" }, goal: { type: "string", enum: gids.length ? gids : ["none"] }, why: { type: "string" } }, required: ["text", "goal", "why"], additionalProperties: false } },
+  duplicates: { type: "array", items: { type: "object", properties: { tasks: { type: "array", items: { type: "string", enum: tids.length ? tids : ["none"] } }, merged: { type: "string" }, why: { type: "string" } }, required: ["tasks", "merged", "why"], additionalProperties: false } },
+}, required: ["summary", "missing", "duplicates"], additionalProperties: false });
+function normalizeAnalysis(out, goals, tasks) {
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const have = new Set(tasks.map((t) => norm(t.desc)));
+  const missing = (Array.isArray(out && out.missing) ? out.missing : []).map((m) => ({ text: oneLine(m && m.text), goal: (goals.find((g) => g.id === String(m && m.goal).trim()) || {}).id || null, why: oneLine(m && m.why) }))
+    .filter((m) => m.text && !have.has(norm(m.text))).slice(0, 5);
+  const used = new Set();
+  const duplicates = [];
+  for (const g of Array.isArray(out && out.duplicates) ? out.duplicates : []) {
+    const idx = [...new Set((Array.isArray(g && g.tasks) ? g.tasks : []).map((t) => parseInt(String(t).replace(/\D/g, ""), 10) - 1))].filter((i) => i >= 0 && i < tasks.length && !used.has(i));
+    if (idx.length < 2) continue;
+    idx.forEach((i) => used.add(i));
+    duplicates.push({ lines: idx.map((i) => tasks[i].raw), merged: oneLine(g.merged) || tasks[idx[0]].desc, why: oneLine(g.why) });
+  }
+  return { summary: oneLine(out && out.summary), missing, duplicates };
+}
+async function analyzeProject(env, path) {
+  const { app } = env, cfg = getConfig(app);
+  const d = await loadAll(app);
+  const p = d.byPath.get(path);
+  if (!p || p.routine) throw new Error("not a project with tasks");
+  const tasks = projectTasks((await readPath(app, path)).split("\n")), goals = projectGoals(d, p);
+  if (!tasks.length && !goals.length) throw new Error("no open tasks and no goals to compare yet");
+  const out = extractJson(await llmChat(env, cfg, analysisMessages(p, goals, tasks, env.moment().format("YYYY-MM-DD")), ANALYSIS_SCHEMA(goals.map((g) => g.id), tasks.map((_, i) => `T${i + 1}`))));
+  return Object.assign(normalizeAnalysis(out, goals, tasks), { goals: goals.map((g) => ({ id: g.id, text: g.text, label: g.label, week: g.week || null })), hash: analysisHash(tasks, goals), created: env.moment().format("YYYY-MM-DD HH:mm") });
+}
+/** Put new description text on a task line, keeping its checkbox, fields and Tasks signifiers. */
+function replaceDesc(line, text) {
+  const box = (line.match(/^\s*(?:[-*+]|\d+[.)])\s+\[.\]\s*/) || ["- [ ] "])[0];
+  const { head, meta } = splitMeta(line);
+  const fields = (head.match(new RegExp(FIELD_SRC, "g")) || []).join(" ");
+  return joinMeta(`${box}${text}${fields ? " " + fields : ""}`, meta);
+}
+/** Merge duplicate tasks into the first one (a task planned for a week wins): new text, the others' sub-items and a (merged) note under it. */
+async function mergeTasks(app, path, lines, text) {
+  let ok = false;
+  await editLines(app, path, (ls) => {
+    const at = lines.map((raw) => ls.indexOf(raw));
+    if (at.some((i) => i < 0)) return;
+    const items = at.map((i) => parseItems(ls, i, i + 1)[0]);
+    const order = items.map((_, k) => k).sort((a, b) => (!!parseFields(lines[b]).week - !!parseFields(lines[a]).week) || at[a] - at[b]);
+    const keep = order[0], kIt = items[keep];
+    const extra = [];
+    for (const k of order.slice(1)) {
+      const it = items[k];
+      extra.push(`${kIt.ws}\t- (merged) ${it.desc}`, ...outdent(ls.slice(it.line + 1, blockEnd(ls, it))).map((l) => `${kIt.ws}\t\t${l}`));
+    }
+    // remove the others bottom-up, then rewrite the kept one
+    for (const k of order.slice(1).sort((a, b) => at[b] - at[a])) { const it = items[k]; ls.splice(it.line, blockEnd(ls, it) - it.line); }
+    const ki = ls.indexOf(lines[keep]);
+    const kept = parseItems(ls, ki, ki + 1)[0];
+    ls.splice(blockEnd(ls, kept), 0, ...extra);
+    ls[ki] = replaceDesc(lines[keep], text);
+    ok = true;
+  });
+  return ok;
+}
+/** Buttons on the project page's AI review card: analyze | add | add-week | skip-missing | merge | skip-dup. Returns a message. */
+async function projectAction(env, act, path, i) {
+  const { app } = env, cfg = getConfig(app);
+  const store = await loadAnalysis(app);
+  const a = store[path];
+  const today = env.moment().format("YYYY-MM-DD");
+  let msg = "";
+  if (act === "analyze") {
+    env.notice("Analyzing the project's tasks…", 3000);
+    store[path] = await analyzeProject(env, path);
+    const r = store[path];
+    msg = `Project review: ${r.missing.length} missing task(s), ${r.duplicates.length} duplicate group(s)`;
+  } else {
+    if (!a) throw new Error("no review for this project — analyze it first");
+    i = Number(i);
+    if (act === "add" || act === "add-week") {
+      const m = a.missing[i];
+      if (!m) throw new Error("that suggestion is gone");
+      let line = newTask(cfg, `- [ ] ${m.text}`, today);
+      if (act === "add-week") { line = setField(line, "week", weekId(env.moment())); await addPlanned(app, path, [line]); }
+      else await editLines(app, path, (ls) => insertIntoProjectSection(ls, "Backlog", [line]));
+      a.missing.splice(i, 1);
+      msg = act === "add-week" ? `Added to this week: ${m.text}` : `Added to the backlog: ${m.text}`;
+    } else if (act === "merge") {
+      const g = a.duplicates[i];
+      if (!g) throw new Error("that suggestion is gone");
+      if (!(await mergeTasks(app, path, g.lines, g.merged))) throw new Error("those tasks changed since the review — analyze again");
+      a.duplicates.splice(i, 1);
+      msg = `Merged ${g.lines.length} tasks into “${g.merged}”`;
+    } else if (act === "skip-missing") a.missing.splice(i, 1);
+    else if (act === "skip-dup") a.duplicates.splice(i, 1);
+    else throw new Error(`unknown action ${act}`);
+  }
+  await saveAnalysis(app, store);
+  return msg;
+}
+function analysisCard(d, p, a, lines) {
+  const btn = (act, label, i, cta = false, title = "") => `<button class="pt-mini${cta ? " mod-cta" : ""}" data-ai="${act}" data-path="${esc(p.path)}"${i !== undefined ? ` data-i="${i}"` : ""}${title ? ` title="${esc(title)}"` : ""}>${label}</button>`;
+  let h = `<div class="pt-card pt-ai"><div class="pt-card-head"><span class="pt-h">🔍 Tasks vs goals</span>${a ? `<span class="pt-muted">reviewed ${esc(a.created)}</span>` : ""}${btn("analyze", a ? "↻ Analyze again" : "Analyze with the local model", undefined, !a, "Check the open tasks against the objective and this / next week's goals, and look for duplicates")}</div>`;
+  if (!a) return h + `<div class="pt-muted pt-hint">Finds tasks that are missing to reach the goals, and tasks that are the same work, so you can add or merge them.</div></div>`;
+  const tasks = lines ? projectTasks(lines) : [];
+  if (lines && a.hash !== analysisHash(tasks, projectGoals(d, p))) h += `<div class="pt-muted pt-hint">The tasks or goals changed since this review.</div>`;
+  if (a.summary) h += `<div class="pt-ai-summary">${esc(a.summary)}</div>`;
+  const goalOf = (id) => (a.goals || []).find((g) => g.id === id);
+  if (a.missing.length) {
+    h += `<div class="pt-sub">Missing to reach the goals <span class="pt-count">${a.missing.length}</span></div>`;
+    h += a.missing.map((m, i) => { const g = goalOf(m.goal); return `<div class="pt-ai-row"><div><b>＋ ${esc(m.text)}</b>${m.why || g ? `<div class="pt-muted">${g ? `${esc(g.label)}: ${esc(g.text)}` : ""}${m.why ? `${g ? " · " : ""}${esc(m.why)}` : ""}</div>` : ""}</div><div class="pt-ai-btns">${btn("add-week", "This week", i, true, "Add to Planned for this week")}${btn("add", "Backlog", i, false, "Add to the backlog")}${btn("skip-missing", "✕", i, false, "Dismiss")}</div></div>`; }).join("");
+  }
+  if (a.duplicates.length) {
+    h += `<div class="pt-sub">Possible duplicates <span class="pt-count">${a.duplicates.length}</span></div>`;
+    const here = new Set(lines || []);
+    h += a.duplicates.map((g, i) => `<div class="pt-ai-row"><div>${g.lines.map((l) => `<div class="${here.has(l) ? "" : "pt-muted"}">☐ ${esc(taskDesc(l))}${here.has(l) ? "" : " (changed)"}</div>`).join("")}<div>→ <b>${esc(g.merged)}</b>${g.why ? ` <span class="pt-muted">· ${esc(g.why)}</span>` : ""}</div></div><div class="pt-ai-btns">${btn("merge", "Merge", i, true, "Keep one task with this text; the others become (merged) notes under it")}${btn("skip-dup", "✕", i, false, "Not duplicates")}</div></div>`).join("");
+  }
+  if (!a.missing.length && !a.duplicates.length) h += `<div class="pt-muted">No open suggestions.</div>`;
+  return h + `</div>`;
 }
 
 /* ------------------------------------------------------------------ commands: projects */
@@ -2583,7 +2965,7 @@ function renderHome(d, opts = {}) {
   h += `</div>`;
   if (opts.tasks) h += renderTaskWidgets(d, opts.tasks);
   h += `<div class="pt-grid3">`;
-  h += `<div class="pt-card"><div class="pt-h">Inbox</div><div class="pt-big">${d.inbox.open}</div><div class="pt-muted">${d.inbox.open ? `${d.inbox.classified} classified · ` : ""}${link(d.inbox.path, "open inbox")}</div></div>`;
+  h += `<div class="pt-card"><div class="pt-h">Inbox</div><div class="pt-big">${d.inbox.open}</div><div class="pt-muted">${d.inbox.free ? `+ ${d.inbox.free} line(s) of notes · ` : ""}${d.inbox.review ? `${link(REVIEW_PATH, "✔ classified — review & apply", "pt-warn")} · ` : ""}${link(d.inbox.path, "open inbox")}</div></div>`;
   const ids = timeline(d, 8);
   const lw = lastClosedWeek(d);
   h += `<div class="pt-card"><div class="pt-h">Momentum · 8 weeks</div>${sparkline(d, ids)}<div class="pt-muted">${lw ? `last week ${lw.m.avg}% avg goal score` : "no history yet"}</div></div>`;
@@ -2757,6 +3139,7 @@ function renderProject(d, path) {
       <span class="pt-num">${total ? `${x.done}/${total} done${x.unpl ? ` <span class="pt-muted">· ${x.unpl} unplanned</span>` : ""}${x.moved ? ` <span class="pt-muted">· ${x.moved} moved on</span>` : ""}` : `<span class="pt-muted">no tasks</span>`}</span></div>`;
   }
   h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", true], ["Add tasks this week (unplanned)", "Add tasks"]])}</div>`;
+  h += analysisCard(d, p, (d.aiStore || {})[p.path], d.aiLines);
   const past = p.history.filter((x) => x.week < d.curId).slice(-8).reverse();
   if (past.length) {
     h += `<div class="pt-h">Recent goals</div><table class="pt-table"><thead><tr><th>Week</th><th>Goal</th><th>Score</th><th></th></tr></thead><tbody>`;
@@ -2923,10 +3306,11 @@ function renderProjects(d) {
 }
 
 async function render(app, mode, path, opts = {}) {
+  if (mode === "classified") return renderClassified(app);
   const d = await loadAll(app);
   if (mode === "home") return renderHome(d, opts);
   if (mode === "week") return renderWeek(d, path, opts);
-  if (mode === "project") return renderProject(d, path);
+  if (mode === "project") { d.aiStore = await loadAnalysis(app); d.aiLines = ((await readPath(app, path)) || "").split("\n"); return renderProject(d, path); }
   if (mode === "analytics") return renderAnalytics(d, opts);
   if (mode === "projects") { d.descStore = await loadDescStore(app); return renderProjects(d); }
   return `<div class="pt-empty">Unknown mode: ${esc(mode)}</div>`;
@@ -2934,7 +3318,7 @@ async function render(app, mode, path, opts = {}) {
 
 /* ------------------------------------------------------------------ entry */
 
-const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
+const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, applyInbox: cmdApplyInbox, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
 
 async function ptrack(tp, cmd, ...args) {
   const app = tp.app || window.app;
@@ -2956,8 +3340,8 @@ async function run(env, cmd, ...args) {
 module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
-  getConfig, loadAll, render, run, makeEnv, descAction, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
-  parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeExtraction, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
+  parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
-  weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, classifyMessages, extractJson, stripThink,
+  weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };

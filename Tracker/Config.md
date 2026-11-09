@@ -24,7 +24,11 @@ llm_url_mobile: ""
 llm_provider_mobile: ""
 llm_model_mobile: ""
 llm_model: qwen2.5:7b-instruct
-llm_auto_file_confidence: 0.9
+llm_flag_below: 0.6
+reference_folder: References
+finance_file: Finance/Spendings.md
+finance_project: ""
+currency: EUR
 llm_examples_per_project: 3
 ---
 # Tracker settings
@@ -51,5 +55,9 @@ Edit the values in the properties above. This note syncs, so both your Mac and y
 | `llm_shortcut` | Name of the shortcut that runs the on-device model. Must match the shortcut's name exactly. |
 | `llm_url_mobile`, `llm_provider_mobile`, `llm_model_mobile` | Only for `llm_mobile: url`. Leave empty otherwise. |
 | `llm_model` | The model's name, e.g. `qwen2.5:7b-instruct`. |
-| `llm_auto_file_confidence` | Items the model is at least this sure about are filed without asking. `1.1` = always ask. |
+| `llm_flag_below` | In the Classified inbox, items the model is less sure about than this are marked `[check:: unsure]`. |
+| `reference_folder` | Your reference notes (one per topic, e.g. `Travel`, `Recipes`). References from the inbox — places to visit, recommendations, how-tos, links — go there, never into projects. A topic that doesn't exist yet becomes a new note here. Give each note a `description` so the model can pick it. |
+| `finance_file` | Spendings from the inbox are collected in this note under *Unprocessed*, with one *Process N new spending(s)* task. |
+| `finance_project` | A project for that task (e.g. `"[[Finance]]"`). Empty = the task sits in the finance note itself. |
+| `currency` | Currency for spendings that don't name one, e.g. `EUR`. |
 | `llm_examples_per_project` | How many recent tasks per project the model sees as examples. |

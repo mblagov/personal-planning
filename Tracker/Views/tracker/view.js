@@ -177,6 +177,15 @@ try {
       await draw();
     }));
 
+    // Project page: tasks vs goals, duplicates (local model)
+    root.querySelectorAll("button[data-ai]").forEach((b) => b.addEventListener("click", async () => {
+      root.querySelectorAll("button[data-ai]").forEach((x) => { x.disabled = true; });
+      if (b.dataset.ai === "analyze") b.textContent = "Analyzing…";
+      try { const msg = await core.projectAction(env, b.dataset.ai, b.dataset.path, b.dataset.i); if (msg) notify(msg); }
+      catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
+      await draw();
+    }));
+
     // Task rows: tick (through the Tasks plugin, so ✅ dates and 🔁 recurrence work), time, edit, open
     root.querySelectorAll(".pt-task").forEach((row) => {
       const check = row.querySelector(".pt-task-check");

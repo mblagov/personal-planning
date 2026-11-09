@@ -22,6 +22,7 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 │   ├── Views/tracker/        # Dataview view + CSS for the dashboards
 │   └── Weeks/                # week notes (sample: 2026-W45, 2026-W46)
 ├── scripts/update-vault.py   # install/update Tracker in your vault, keeping your data
+├── References/               # sample reference notes (Travel, Home & tools)
 └── Projects/                 # sample projects, one folder per project
     ├── personal/             # scope "personal"
     │   ├── Sailing/          # active
@@ -38,7 +39,7 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 
 - [Obsidian](https://obsidian.md) with these community plugins:
   - **Dataview**, with *Enable JavaScript queries* turned on
-  - **Templater**: add the nine files in `Tracker/Commands/` under *Template hotkeys*
+  - **Templater**: add the ten files in `Tracker/Commands/` under *Template hotkeys*
   - **Tasks**: keep *Set done date on every completed task* on
 - Optional: a local model for sorting the inbox
   - Mac: [Ollama](https://ollama.com) (`ollama pull qwen2.5:7b-instruct`) or LM Studio
@@ -92,9 +93,11 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | When | Command | What happens |
 |---|---|---|
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
-| When convenient | **Process inbox** | The local LLM reads the whole inbox note. It splits free text (notes, ideas, links) into separate items and keeps the original in `Inbox archive.md`. It then suggests a project, a type (task / idea / reference), and a priority for each item. Confident items are filed automatically. |
+| When convenient | **Process inbox** | The local LLM reads the whole inbox note (items and free text) and writes `Tracker/Classified inbox` for you to check: tasks and ideas → projects, references (places to visit, tips, links) → reference notes in `References/`, spendings → the finance note. The inbox isn't changed. |
+| After checking | **Apply inbox** | Files everything, asks about items without a destination (every menu has ← Back), adds one *Process new spendings* task, archives the inbox to `Inbox archive.md` and clears it. |
 | Anytime | **Projects** note | Set each project's priority (high / medium / low) and status. **Plan week** lists projects by priority. The local LLM can rate each description (the inbox sorter relies on them) and draft one from the project's folder. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
+| Anytime | **Project note** → *Analyze* | The local LLM checks the open tasks against the objective and the week's goals: suggests missing tasks (add with one click) and merges duplicates. |
 | During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
 | During the week | **Add tasks** | Adds tasks that came up to this week, in the project's `## Unplanned` section. They count like planned ones; Analytics shows the planned/unplanned split. |
 | During the week | **Log time** / ⏱ | Logs hands-on (`active`) and unattended (`passive`) time on a task. Planning asks for an estimate (`est`). Week notes, project pages and Analytics compare estimates with time spent. |
@@ -157,7 +160,8 @@ keywords: [boat, marina, berth]
 
 - **2026-W45** is a reviewed week: goals scored at 67%, 50%, 100%, and 0%, with miss reasons, wins, lessons, and energy.
 - **2026-W46** is the current week, planned with three goals.
-- `Tracker/Inbox.md` holds four unsorted items to try **Process inbox** on.
+- `Tracker/Inbox.md` holds unsorted items and free text — a task, an idea, places to visit, a spending — to try **Process inbox** on.
+- `References/` holds two reference notes (Travel, Home & tools) for references from the inbox.
 
 ## Routines
 

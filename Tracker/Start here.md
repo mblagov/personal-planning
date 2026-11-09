@@ -22,8 +22,8 @@ Settings → Community plugins → Browse. Install and enable:
 - Settings → Dataview → turn on **Enable JavaScript queries**.
 
 **Templater**
-- Settings → Templater → **Template hotkeys** → add these nine files, one per row:
-  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
+- Settings → Templater → **Template hotkeys** → add these ten files, one per row:
+  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Apply inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
 - That's all. You do **not** need to set a template folder or a script folder.
 - Optional: Settings → Hotkeys → search "Tracker/Commands" to give them keyboard shortcuts.
 
@@ -116,7 +116,7 @@ Everything else stays the same: the request and response files, the `#####` sepa
 **Use it:**
 1. On the iPhone, tap **Process inbox**. Obsidian writes the items to `Tracker/AI/request.json` and opens the shortcut.
 2. The model sorts each item, taking a few seconds per item. Then the shortcut switches back to Obsidian.
-3. Tap **Process inbox** again. It applies the answers and walks you through filing, exactly as on the Mac. Items it's very sure about are filed automatically.
+3. Tap **Process inbox** again. It turns the answers into the **Classified inbox** note for you to check, exactly as on the Mac; then tap **Apply inbox**.
 
 The first run asks for a few permissions. Allow each one, choosing *Always Allow* where offered:
 - Obsidian opening Shortcuts
@@ -126,7 +126,7 @@ Good to know:
 - Apple's on-device model is smaller than the one on your Mac, so short, clear project **descriptions** matter even more here.
 - The Mac keeps using Ollama (`llm_url`). The two devices don't talk to each other.
 - The weekly review's optional AI summary is offered only on the Mac. Apple's model isn't wired to it.
-- If you'd rather not use AI on the phone, leave `llm_mobile: off`. Process inbox then lets you file items by hand.
+- If you'd rather not use AI on the phone, leave `llm_mobile: off`. Process inbox then lists the items in the Classified inbox without destinations, and **Apply inbox** asks where each one goes.
 
 ## 6. Planning with dates (Tasks plugin)
 
@@ -153,7 +153,13 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
 
 **Any time — Capture.** One item per line → `Tracker/Inbox.md`. Or type `- [ ] something` there directly.
 
-**When convenient — Process inbox.** The model reads the **whole inbox note**, not only the `- [ ]` items: free text anywhere in it (paragraphs, plain bullets, pasted notes and links) is split into separate tasks, ideas and references, each with a short title, the rest of the text as sub-bullets, and a 📅 date when the notes give one. They join the queue as classified items, and the original text is copied to `Tracker/Inbox archive.md` first. Only the info callout, headings and the queue's tasks are left alone. On the iPhone the notes go through the same Shortcut as the items. Without a model the notes stay where they are. Then, for every item, the model suggests a project, a type (task / idea / reference) and a confidence. Confident items are filed automatically (`llm_auto_file_confidence`). For the rest you confirm or choose: file to a project, **plan it for this week** (goes straight to that project's `## Planned`), keep, or delete. Tasks go to the project's `## Backlog`; ideas 💡 and references 📎 to `## Notes & ideas`.
+**When convenient — Process inbox, then Apply inbox.** Two steps, so nothing is filed before you've seen it:
+1. **Process inbox** reads the **whole inbox note** — the `- [ ]` items and any free text (paragraphs, plain bullets, pasted notes and links; free text is split into separate items) — and writes the result to **`Tracker/Classified inbox`**. *The inbox itself isn't changed.* The note has four sections:
+   - **Tasks** and **Ideas** → a project: `- ☐ Book the haul-out [to:: [[Sailing]]] 📅 2026-11-20`.
+   - **References** → a reference note in `reference_folder` (default `References/`, one note per topic: Travel, Recipes, Home & tools…): `- 📎 Naschmarkt is best on Saturday mornings [to:: [[Travel]]]`. Places to visit, recommendations, how-tos and links **never go into projects** — a place to visit goes to Travel even if you have a trip project. When no note fits, the model proposes a new one (`[new:: reference note]`); it's created when you apply.
+   - **Spendings** → `- 💶 Groceries at the market [amount:: 86.4] [currency:: EUR] [date:: 2026-11-08] [category:: groceries]`.
+   Edit anything: change `[to:: …]` to another project or note, move a line to another section to change what it is, fix the text or the amount, delete lines. `[check:: unsure]` marks items the model wasn't sure about (`llm_flag_below`). Add `[week:: 2026-W46]` to a task to plan it for that week. The summary at the top counts what goes where.
+2. **Apply inbox** (the button in the Classified inbox, or run Process inbox again) files everything: tasks to the project's `## Backlog` (or `## Planned` with `[week::]`), ideas 💡 to `## Notes & ideas`, references 📎 to the end of their reference note, spendings to `finance_file` under *Unprocessed* — plus **one** task *Process N new spending(s)* (in that note, or in `finance_project`), which is updated rather than repeated next time. Items still at `[to:: none]` are asked about one by one: a project, a reference note, a new reference note, change the type, leave it in the inbox, or delete. **Every menu has ← Back**, and *← Back to the previous item* re-opens your last choice; nothing is written until the final *Apply* (which also has *← Back to the questions*; Esc cancels everything). Then the inbox is cleared — what it held is kept in `Tracker/Inbox archive.md` — except items you chose to leave, and anything you added to the inbox after classifying.
 
 **During the week.** Work from Home → Today. A goal's progress = share of its tasks done.
 
@@ -196,6 +202,7 @@ Recurring routines live in **routine projects** — one per scope, e.g. `Project
 - **Home**: buttons, this week's goals with progress, focus tasks (today / later this week / any day), the *Outside this week's focus* box, inbox count, 8-week momentum, what needs attention.
 - **Week note**: goals achieved, average progress, tasks done, done outside goals; then every goal with its bar and all the tasks picked for it (tick / edit / open right there).
 - **Project note**: objective, weeks in focus, average goal score, a 16-week focus strip, a **Planned** card (this week / next week: goal and tasks done) with a *Pick tasks* button, recent goals with scores and reasons. The tasks themselves are in the note's `## Planned` section.
+  - **🔍 Tasks vs goals** (needs the local model): **Analyze** sends the open tasks (Planned, Unplanned, Backlog) and the goals (the project's objective, this and next week's goal) to the model. It answers with a short summary, up to five **missing tasks** needed to reach a goal — add each to *This week* or the *Backlog* with one click — and groups of **possible duplicates** with a merged wording. **Merge** keeps one task (the one planned for a week, if any) with that text and its fields and dates; the others are removed and noted under it as `(merged) …` with their sub-items. ✕ dismisses a suggestion. The review is kept in `Tracker/AI/analysis.json`; when the tasks change it says so, and a merge whose tasks changed is refused — analyze again.
 - **Analytics**: last week vs your 4-week average, score per week with trend, tasks done vs planned, which projects got your weeks (heatmap), project table, why goals fell short, active projects you keep skipping, review notes.
 
 ## 10. The format (plain Markdown — edit by hand any time)
