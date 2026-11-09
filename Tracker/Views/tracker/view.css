@@ -135,3 +135,28 @@
 .pt-select { font-size: var(--font-ui-small); padding: 0 1.6em 0 .5em; height: auto; min-height: 1.8em; }
 .pt-prio-high .pt-select-priority { color: var(--text-error); font-weight: 600; }
 .pt-prio-low .pt-select-priority { color: var(--text-muted); }
+
+/* Project descriptions (rated / written by the local model) */
+.pt-desc-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; font-size: var(--font-ui-small); margin: 4px 0 10px; }
+.pt-desc-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 3px; }
+.pt-mini { font-size: var(--font-ui-smaller); padding: 1px 8px; height: auto; min-height: 1.7em; }
+.pt-q { font-size: var(--font-ui-smaller); font-weight: 600; padding: 0 6px; border-radius: 8px; background: var(--background-secondary); white-space: nowrap; }
+.pt-q-good { color: var(--pt-full, var(--color-green)); }
+.pt-q-fair { color: var(--color-orange, #db6d28); }
+.pt-q-weak, .pt-q-missing { color: var(--pt-low, var(--text-error)); }
+.pt-q-unchecked { color: var(--text-muted); font-weight: 400; }
+.pt-desc-more { font-size: var(--font-ui-smaller); max-width: 32em; margin-top: 3px; }
+.pt-desc-more summary { cursor: pointer; color: var(--text-muted); }
+.pt-proposal { font-size: var(--font-ui-smaller); max-width: 32em; margin-top: 4px; padding: 6px 8px; border-radius: 6px; background: var(--background-secondary); display: flex; flex-direction: column; gap: 4px; }
+.pt-proposal .pt-mini { margin-right: 4px; }
+
+/* Time: estimates and time spent */
+.pt-chip-time { color: var(--text-muted); }
+.pt-goal-time { margin-left: auto; font-size: var(--font-ui-smaller); white-space: nowrap; }
+.pt-time-modal .pt-time-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.pt-time-modal label { display: flex; flex-direction: column; }
+.pt-time-modal label .pt-muted { font-size: var(--font-ui-smaller); }
+.pt-time-modal .pt-time-input { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pt-time-modal input { width: 9em; }
+.pt-time-modal input.pt-bad { border-color: var(--text-error); }
+.pt-time-modal .pt-actions { justify-content: flex-end; }

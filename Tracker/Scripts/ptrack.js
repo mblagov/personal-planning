@@ -34,6 +34,8 @@ const DEFAULTS = {
   llm_model_mobile: "",
   plan_schedule_tasks: true,
   plan_due_dates: true,
+  plan_estimates: true,        // ask for a time estimate when a task is planned
+  log_time_on_done: true,      // ticking a task with an estimate (in Tracker views) asks for the time spent
   upcoming_days: 7,
   task_tag: "",
 };
@@ -174,6 +176,8 @@ function taskLabel(it) {
   const due = getDate(it.raw, "due"), sch = getDate(it.raw, "scheduled");
   if (sch) bits.push(`⏳ ${sch.slice(5)}`);
   if (due) bits.push(`📅 ${due.slice(5)}`);
+  const est = timeOf(it.raw).est;
+  if (est) bits.push(`≈${fmtDur(est)}`);
   return `${p === "highest" || p === "high" ? "‼ " : p === "low" || p === "lowest" ? "· " : ""}${it.desc}${bits.length ? "  " + bits.join(" ") : ""}`;
 }
 
@@ -716,6 +720,13 @@ function computeStats(d) {
     }
     d.mix.set(wid, pm);
   }
+  // Time: estimates and time spent on the tasks picked for each week (dropped ones don't count)
+  d.time = new Map();
+  for (const [wid, m2] of d.sel) {
+    const pm = new Map();
+    for (const [pp, b] of m2) { const a = T0(); for (const t of b.here) if (t.status !== "-") tAdd(a, t); pm.set(pp, a); }
+    d.time.set(wid, pm);
+  }
   for (const w of d.weeks) {
     const a = mixSum(d, [w.id]);
     w.m.unplanned = a.unplanned; w.m.unplannedDone = a.unplannedDone; w.m.plannedOnly = a.planned;
@@ -756,6 +767,65 @@ function timeline(d, n, { trim = false, min = 6 } = {}) {
   }
   return out;
 }
+
+/* ------------------------------------------------------------------ time: estimates and time spent
+ * On a task line:  [est:: 2h]        estimate of the hands-on time
+ *                  [active:: 1h30m]  hands-on time actually spent
+ *                  [passive:: 3h]    time it took without your attention (drying, waiting for a reply, a long upload)
+ * Durations: 45m · 2h · 1h30m · 1.5h · 1:30 · a plain number = minutes. Stored as 1h30m. */
+const TIME_KEYS = ["est", "active", "passive"];
+function parseDur(s) {
+  const v = String(s ?? "").trim().toLowerCase().replace(/\s+/g, "").replace(/,/g, ".");
+  if (!v) return null;
+  let m = v.match(/^(\d+):([0-5]?\d)$/);
+  if (m) return +m[1] * 60 + +m[2];
+  if (/^\d+$/.test(v)) return +v;
+  m = v.match(/^(?:(\d+(?:\.\d+)?)h(?:rs?|ours?)?)?(?:(\d+)m(?:in)?)?$/);
+  if (!m || (m[1] === undefined && m[2] === undefined)) return null;
+  return Math.round(parseFloat(m[1] || 0) * 60 + parseInt(m[2] || 0, 10));
+}
+function fmtDur(min) {
+  if (min === null || min === undefined || isNaN(min)) return "";
+  min = Math.round(min);
+  const h = Math.floor(min / 60), m = min % 60;
+  return h ? `${h}h${m ? `${m}m` : ""}` : `${m}m`;
+}
+/** {est, active, passive} in minutes (null when not set) from a task line or its parsed fields. */
+function timeOf(x) {
+  const f = typeof x === "string" ? parseFields(x) : x || {};
+  const out = {};
+  for (const k of TIME_KEYS) out[k] = f[k] !== undefined ? parseDur(f[k]) : null;
+  return out;
+}
+function setTime(line, key, min) { return setField(line, key, min === null || min === undefined || min <= 0 ? null : fmtDur(min)); }
+function addTime(line, key, min) { return setTime(line, key, (timeOf(line)[key] || 0) + min); }
+/** Set several time fields at once: vals = {est, active, passive} in minutes; undefined = leave, null/0 = remove. */
+function setTimes(line, vals) {
+  for (const k of TIME_KEYS) if (vals[k] !== undefined) line = setTime(line, k, vals[k]);
+  return line;
+}
+/** A recurring task's next occurrence must not inherit the time spent on this one. */
+function cleanRecurrence(text) {
+  const ls = String(text).split("\n");
+  if (ls.length < 2) return text;
+  return ls.map((l) => (/^\s*[-*+]\s+\[[ /]\]/.test(l) ? setTimes(l, { active: null, passive: null }) : l)).join("\n");
+}
+const T0 = () => ({ tasks: 0, est: 0, estN: 0, active: 0, passive: 0, logged: 0, doneEst: 0, doneActive: 0, doneN: 0 });
+function tAdd(a, t) {
+  const tm = timeOf(t.fields);
+  a.tasks++;
+  if (tm.est) { a.est += tm.est; a.estN++; }
+  if (tm.active || tm.passive) a.logged++;
+  a.active += tm.active || 0; a.passive += tm.passive || 0;
+  if (isDone(t) && tm.est && tm.active) { a.doneEst += tm.est; a.doneActive += tm.active; a.doneN++; }
+}
+function tSum(d, ids, pp = null) {
+  const out = T0();
+  for (const id of ids) { const pm = d.time && d.time.get(id); if (!pm) continue; for (const [k, a] of pm) if (!pp || k === pp) for (const f of Object.keys(out)) out[f] += a[f]; }
+  return out;
+}
+/** Actual hands-on time as % of the estimate, over done tasks that have both (100% = spot on, 150% = took 1.5×). */
+const tAcc = (a) => (a.doneEst ? Math.round((100 * a.doneActive) / a.doneEst) : null);
 
 /* ------------------------------------------------------------------ local LLM */
 
@@ -1175,6 +1245,170 @@ async function applyShortcutResults(env, cfg) {
   return { pending: false, applied: n };
 }
 
+/* ------------------------------------------------------------------ project descriptions (LLM)
+ * The inbox model sorts notes into projects by their descriptions, so the Projects note can have the local
+ * model rate each description, and write one from what's in the project's folder.
+ * Results live in Tracker/AI/descriptions.json: { path: { hash, checked, score, issues, suggestion, proposal } }. */
+const DESC_STORE = `${AI_DIR}/descriptions.json`;
+const DESC_CONTEXT_CHARS = 6000; // folder content sent to the model when writing a description
+async function loadDescStore(app) {
+  try { return (await aiExists(app, DESC_STORE)) ? JSON.parse(await app.vault.adapter.read(DESC_STORE)) || {} : {}; }
+  catch (e) { return {}; }
+}
+async function saveDescStore(app, store) {
+  if (!(await aiExists(app, AI_DIR))) await app.vault.adapter.mkdir(AI_DIR);
+  await app.vault.adapter.write(DESC_STORE, JSON.stringify(store, null, 1));
+}
+/** Changes when anything the check looked at changes, so an old rating shows as out of date. */
+function descHash(p) {
+  const str = [p.name, p.description, p.objective, p.keywords.join(",")].join("\u0001");
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+const descVerdict = (score) => (score >= 80 ? "good" : score >= 50 ? "fair" : "weak");
+function descProjects(app, cfg) { return listProjects(app, cfg).filter((p) => !p.routine); }
+const liveStatus = (p) => !["done", "archived", "dropped"].includes(p.status);
+function othersText(p, all) {
+  return all.filter((x) => x !== p && liveStatus(x)).map((x) => `- ${x.name}${x.description ? `: ${x.description}` : " (no description)"}`).join("\n") || "(none)";
+}
+async function sampleTasks(app, p, n = 10) {
+  const ls = (await app.vault.cachedRead(p.file)).split("\n");
+  return parseItems(ls).filter((t) => t.task && !t.parent).map((t) => taskDesc(t.raw)).filter(Boolean).slice(-n);
+}
+function descCheckMessages(p, all, tasks) {
+  const system = "You review the short descriptions of projects in a personal planning system. A small local model reads these descriptions to decide which project an inbox note belongs to, so a good description makes that decision easy. You answer with one JSON object and nothing else.";
+  const user = `Project: ${p.name} [${p.scope}]
+Description: "${p.description}"
+${p.objective ? `Objective: ${p.objective}\n` : ""}${p.keywords.length ? `Keywords: ${p.keywords.join(", ")}\n` : ""}Some of its tasks:
+${tasks.length ? tasks.map((t) => `- ${t}`).join("\n") : "(none yet)"}
+
+The other projects:
+${othersText(p, all)}
+
+Rate the description from 0 to 100:
+- Clear: says in plain words what the project covers and what kind of work it involves.
+- Distinct: easy to tell apart from the other projects. Name any project it overlaps with.
+- Concrete: mentions the typical things, places, people or activities, so notes like the tasks above clearly match.
+- Short: one to three sentences. Goals and deadlines belong in the objective, not here.
+80 or more = good, 50 to 79 = could be better, under 50 = weak.
+
+"issues": up to 3 short problems, in the same language as the description (empty if there are none).
+"suggestion": a better description of one to three sentences in the same language, or "" if it is already good.
+
+Answer with JSON like {"score":65,"issues":["Overlaps with Home renovation"],"suggestion":"…"}`;
+  return [{ role: "system", content: system }, { role: "user", content: user }];
+}
+const DESC_CHECK_SCHEMA = { type: "object", properties: { score: { type: "number" }, issues: { type: "array", items: { type: "string" } }, suggestion: { type: "string" } }, required: ["score", "issues", "suggestion"], additionalProperties: false };
+function normalizeDescCheck(out, p) {
+  let score = Number(out && out.score);
+  if (!isFinite(score)) score = 0;
+  if (score > 0 && score <= 1) score *= 100; // some models answer 0..1
+  score = clamp(Math.round(score), 0, 100);
+  const issues = (Array.isArray(out && out.issues) ? out.issues : []).map((x) => oneLine(x)).filter(Boolean).slice(0, 3);
+  let suggestion = oneLine((out && out.suggestion) || "").replace(/^"|"$/g, "");
+  if (suggestion.toLowerCase() === String(p.description).trim().toLowerCase()) suggestion = "";
+  return { score, verdict: descVerdict(score), issues, suggestion };
+}
+/** The project's own folder (its note and every other file in it) as text for the model, capped at DESC_CONTEXT_CHARS. */
+async function projectFolderText(app, cfg, p) {
+  const all = listProjects(app, cfg);
+  const ctx = { cfg, projects: all };
+  const sc = projectScope(ctx, all.find((x) => x.path === p.path) || p);
+  const clean = (c) => String(c).replace(/^---\n[\s\S]*?\n---\n/, "").replace(/```[\s\S]*?```/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  const parts = [`### ${p.file.name} (the project note)\n${clean(await app.vault.cachedRead(p.file))}`];
+  const others = [];
+  if (sc.folder) {
+    const md = app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(sc.folder) && f.path !== p.path && (projectOfPath(ctx, f.path) || {}).path === p.path).sort((a, b) => a.path.localeCompare(b.path));
+    for (const f of md) parts.push(`### ${f.path.slice(sc.folder.length)}\n${clean(await app.vault.cachedRead(f)).slice(0, 1500)}`);
+    const root = app.vault.getAbstractFileByPath(sc.folder.replace(/\/$/, ""));
+    (function walk(fo) { for (const c of (fo && fo.children) || []) { if (c.children) walk(c); else if (c.extension && c.extension !== "md") others.push(c.path.slice(sc.folder.length)); } })(root);
+  }
+  let text = parts.join("\n\n");
+  if (others.length) text += `\n\n### Other files\n${others.slice(0, 40).join(", ")}`;
+  return text.length > DESC_CONTEXT_CHARS ? text.slice(0, DESC_CONTEXT_CHARS) + "\n…(cut)" : text;
+}
+function descWriteMessages(p, all, content) {
+  const system = "You write short descriptions of projects in a personal planning system. A small local model reads them to decide which project an inbox note belongs to. You answer with one JSON object and nothing else.";
+  const user = `Write a description for the project "${p.name}" [${p.scope}].
+${p.description ? `Current description: "${p.description}"\n` : ""}${p.objective ? `Objective: ${p.objective}\n` : ""}
+The other projects (the description must make this one easy to tell apart from them):
+${othersText(p, all)}
+
+What's in the project's folder:
+${content}
+
+Rules:
+- "description": one to three sentences, at most 300 characters, saying what the project covers and the kind of work it involves. Mention the typical things, places, people or activities. No goals, dates or progress. Use the language of the notes.
+- "keywords": 3 to 8 short lowercase words or phrases that notes about this project are likely to contain.
+
+Answer with JSON like {"description":"…","keywords":["…","…"]}`;
+  return [{ role: "system", content: system }, { role: "user", content: user }];
+}
+const DESC_WRITE_SCHEMA = { type: "object", properties: { description: { type: "string" }, keywords: { type: "array", items: { type: "string" } } }, required: ["description", "keywords"], additionalProperties: false };
+
+async function checkDescription(env, path, store) {
+  const { app } = env, cfg = getConfig(app);
+  const all = descProjects(app, cfg), p = all.find((x) => x.path === path);
+  if (!p) throw new Error(`not a project: ${path}`);
+  const prev = store[path] || {};
+  let r;
+  if (!p.description.trim()) r = { score: 0, verdict: "missing", issues: ["No description yet — the inbox model can't match notes to this project."], suggestion: "" };
+  else r = normalizeDescCheck(extractJson(await llmChat(env, cfg, descCheckMessages(p, all, await sampleTasks(app, p)), DESC_CHECK_SCHEMA)), p);
+  store[path] = Object.assign({}, prev.proposal ? { proposal: prev.proposal } : {}, r, { hash: descHash(p), checked: env.moment().format("YYYY-MM-DD") });
+  return store[path];
+}
+async function generateDescription(env, path, store) {
+  const { app } = env, cfg = getConfig(app);
+  const all = descProjects(app, cfg), p = all.find((x) => x.path === path);
+  if (!p) throw new Error(`not a project: ${path}`);
+  const out = extractJson(await llmChat(env, cfg, descWriteMessages(p, all, await projectFolderText(app, cfg, p)), DESC_WRITE_SCHEMA));
+  const description = oneLine(out.description || "").replace(/^"|"$/g, "");
+  if (!description) throw new Error("the model didn't write a description — try again or write it yourself");
+  const keywords = [...new Set((Array.isArray(out.keywords) ? out.keywords : []).map((k) => String(k).trim().toLowerCase()).filter(Boolean))].slice(0, 8);
+  store[path] = Object.assign({}, store[path] || {}, { proposal: { description, keywords, created: env.moment().format("YYYY-MM-DD") } });
+  return store[path].proposal;
+}
+/** Write a description (a generated proposal, or the check's suggestion) into the project's properties. */
+async function applyDescription(app, path, store, which) {
+  const st = store[path] || {};
+  const src = which === "suggestion" ? { description: st.suggestion, keywords: [] } : st.proposal;
+  if (!src || !src.description) throw new Error("nothing to apply — generate or check again");
+  const f = app.vault.getAbstractFileByPath(path);
+  if (!f) throw new Error(`File not found: ${path}`);
+  await app.fileManager.processFrontMatter(f, (fm) => {
+    fm.description = src.description;
+    const kw = toArr(fm.keywords);
+    if (!kw.length && src.keywords && src.keywords.length) fm.keywords = src.keywords;
+  });
+  if (which === "suggestion") delete st.suggestion; else delete st.proposal;
+  store[path] = st;
+}
+/** Actions from the Projects note's buttons: check | generate | use-proposal | use-suggestion | dismiss | check-all (new or changed) | recheck-all. Returns a message. */
+async function descAction(env, act, path) {
+  const { app } = env, cfg = getConfig(app);
+  const store = await loadDescStore(app);
+  let msg = "";
+  try {
+    if (act === "check") { const r = await checkDescription(env, path, store); msg = r.verdict === "missing" ? "No description to check — try ✨ Write one." : `Description: ${r.score}/100 (${r.verdict})`; }
+    else if (act === "generate") { await generateDescription(env, path, store); msg = "✨ Description written — use it or dismiss it."; }
+    else if (act === "use-proposal" || act === "use-suggestion") { await applyDescription(app, path, store, act === "use-proposal" ? "proposal" : "suggestion"); msg = "Description saved to the project's properties. Check it again to rate it."; }
+    else if (act === "dismiss") { if (store[path]) delete store[path].proposal; msg = ""; }
+    else if (act === "check-all" || act === "recheck-all") {
+      const todo = descProjects(app, cfg).filter((p) => liveStatus(p) && (act === "recheck-all" || !store[p.path] || store[p.path].hash !== descHash(p) || !store[p.path].verdict));
+      if (!todo.length) msg = "All descriptions are already checked.";
+      let i = 0;
+      for (const p of todo) {
+        env.notice(`Checking ${++i}/${todo.length}: ${p.name}`, 2500);
+        await checkDescription(env, p.path, store);
+        await saveDescStore(app, store); // keep what's done if a later one fails
+      }
+      if (todo.length) { const w = todo.filter((p) => store[p.path].verdict !== "good").length; msg = `Checked ${todo.length} description(s)${w ? ` · ${w} could be better` : " · all good"}`; }
+    } else throw new Error(`unknown action ${act}`);
+  } finally { await saveDescStore(app, store); }
+  return msg;
+}
+
 async function cmdClassify(env, { quiet = false } = {}) {
   const { app } = env, cfg = getConfig(app);
   await ensureInbox(app, cfg);
@@ -1508,7 +1742,32 @@ async function addTasksToGoal(app, wp, goalIndex, blocks) {
 async function askSchedule(env, cfg, target, line) {
   if (cfg.plan_schedule_tasks) line = await askScheduled(env, target, line);
   if (cfg.plan_due_dates) line = await askDue(env, target, line);
+  if (cfg.plan_estimates) line = await askEstimate(env, line);
   return line;
+}
+const EST_CHOICES = [15, 30, 60, 90, 120, 180, 240, 360, 480];
+/** Ask for a time estimate of the hands-on work. Sets [est:: …]. Esc leaves the line as it is. */
+async function askEstimate(env, line) {
+  const cur = timeOf(line).est;
+  const opts = cur ? [[`Keep ≈ ${fmtDur(cur)}`, cur], ["Remove estimate", 0]] : [["No estimate", 0]];
+  for (const m of EST_CHOICES) if (m !== cur) opts.push([`≈ ${fmtDur(m)}`, m]);
+  opts.push(["Other…", "other"]);
+  let v = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), `≈ How long will “${taskDesc(line)}” take (hands-on)?`);
+  if (v === null || v === undefined) return line;
+  if (v === "other") v = await askDuration(env, `≈ Estimate for “${taskDesc(line)}” — e.g. 45m, 2h, 1h30m (empty = none)`, cur ? fmtDur(cur) : "");
+  if (v === undefined) return line;
+  return setTime(line, "est", v || null);
+}
+/** Prompt for a duration until it parses. Returns minutes, 0 for empty, undefined on Esc. */
+async function askDuration(env, q, def = "") {
+  for (;;) {
+    const t = await env.prompt(q, def);
+    if (t === null || t === undefined) return undefined;
+    if (!String(t).trim()) return 0;
+    const m = parseDur(t);
+    if (m !== null) return m;
+    env.notice(`“${t}” isn't a duration. Use e.g. 45m, 2h, 1h30m or 1:30.`, 5000);
+  }
 }
 const taskDesc = (line) => stripFields(splitMeta(line.replace(/^\s*[-*+]\s+\[.\]\s*/, "")).head);
 const isIsoDate = (s, env) => /^\d{4}-\d{2}-\d{2}$/.test(s) && env.moment(s, "YYYY-MM-DD").format("YYYY-MM-DD") === s;
@@ -1573,18 +1832,23 @@ async function pickTasks(env, project, header, target, { unplanned = false } = {
   const mark = (line) => (unplanned ? setField(planLine(line, target), "unplanned", addFrom(parseFields(line).unplanned, target)) : planLine(line, target));
   const add = (lines) => (unplanned ? addToSection(app, project.path, UNPLANNED_SEC, lines) : addPlanned(app, project.path, lines));
   const lines0 = (await readPath(app, project.path)).split("\n");
-  const already = parseItems(lines0).filter((t) => t.task && isOpen(t) && weekIds(t.fields.week)[0] === target).length;
+  const inWeek = parseItems(lines0).filter((t) => t.task && isOpen(t) && weekIds(t.fields.week)[0] === target);
+  const already = inWeek.length;
+  let estMin = sum(inWeek.map((t) => timeOf(t.fields).est || 0));
   const remaining = backlogItems(lines0).sort(byPrioDue);
   let added = 0;
   for (;;) {
-    const opts = [[unplanned ? `✔ Done — ${added} task(s) added to ${shortWeek(target)} (unplanned)` : `✔ Done — ${already + added} task(s) planned for ${shortWeek(target)}`, "done"], ["＋ Type new task(s)…", "new"],
+    const est = estMin ? ` · ≈ ${fmtDur(estMin)} estimated` : "";
+    const opts = [[unplanned ? `✔ Done — ${added} task(s) added to ${shortWeek(target)} (unplanned)${est}` : `✔ Done — ${already + added} task(s) planned for ${shortWeek(target)}${est}`, "done"], ["＋ Type new task(s)…", "new"],
       ...remaining.map((t) => [taskLabel(t), t])];
     const c = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), header);
     if (c === null || c === undefined || c === "done") break;
     if (c === "new") {
       const txt = await env.prompt("New task(s) — one per line (Tasks dates like 📅 2026-11-20 are fine)", "", true);
       if (txt) for (const t of txt.split(/\r?\n/).map((x) => x.trim().replace(/^[-*]\s+(\[.\]\s+)?/, "")).filter(Boolean)) {
-        await add([mark(await askSchedule(env, cfg, target, newTask(cfg, `- [ ] ${t}`, today)))]);
+        const ln = mark(await askSchedule(env, cfg, target, newTask(cfg, `- [ ] ${t}`, today)));
+        await add([ln]);
+        estMin += timeOf(ln).est || 0;
         added++;
       }
       continue;
@@ -1593,6 +1857,7 @@ async function pickTasks(env, project, header, target, { unplanned = false } = {
     if (block) {
       block[0] = mark(await askSchedule(env, cfg, target, block[0]));
       await add(block);
+      estMin += timeOf(block[0]).est || 0;
       added++;
     }
     remaining.splice(remaining.indexOf(c), 1);
@@ -1652,6 +1917,58 @@ async function cmdAddTasks(env) {
   await ensureWeek(app, data.cfg, cur);
   const n = await pickTasks(env, p, `${p.name} · add unplanned tasks to ${shortWeek(cur)}`, cur, { unplanned: true });
   if (n) env.notice(`${p.name}: ${n} unplanned task(s) added to ${cur}. They're in the project's “${UNPLANNED_SEC}” section and count like planned ones; Analytics shows the planned/unplanned split.`, 7000);
+}
+
+const timeText = (tm) => [tm.est ? `≈ ${fmtDur(tm.est)} est.` : "", tm.active ? `⏱ ${fmtDur(tm.active)} active` : "", tm.passive ? `⌛ ${fmtDur(tm.passive)} passive` : ""].filter(Boolean).join(" · ");
+/** Log time spent (active / passive) or set the estimate for a task: the one under the cursor, or one picked from this or last week. */
+async function cmdLogTime(env) {
+  const { app } = env;
+  let path = null, raw = null, hint;
+  const ae = app.workspace && app.workspace.activeEditor;
+  if (ae && ae.editor && ae.file) {
+    const ln = ae.editor.getCursor().line, txt = ae.editor.getLine(ln);
+    if (/^\s*(?:[-*+]|\d+[.)])\s+\[.\]/.test(txt)) { path = ae.file.path; raw = txt; hint = ln; }
+  }
+  if (!path) {
+    const d = await loadAll(app);
+    const ts = [];
+    for (const wid of [d.curId, shiftWeek(d.curId, -1)]) {
+      const m2 = d.sel.get(wid);
+      if (m2) for (const [pp, b] of m2) for (const t of b.here) if (t.status !== "-") ts.push({ t, wid, p: d.byPath.get(pp) });
+    }
+    if (!ts.length) throw new Error("no tasks planned for this or last week — put the cursor on a task line and run Log time again");
+    ts.sort((a, b) => b.wid.localeCompare(a.wid) || isDone(a.t) - isDone(b.t) || (a.p ? a.p.name : "").localeCompare(b.p ? b.p.name : ""));
+    const label = (x) => { const tm = timeText(timeOf(x.t.fields)); return `${isDone(x.t) ? "✓ " : ""}${taskDesc(x.t.raw)}  ·  ${x.p ? x.p.name : ""} · ${shortWeek(x.wid)}${tm ? `  ·  ${tm}` : ""}`; };
+    const c = await ask(env, ts.map(label), ts, "⏱ Log time for which task?");
+    path = c.t.path; raw = c.t.raw; hint = c.t.line;
+  }
+  const desc = taskDesc(raw);
+  let changed = false;
+  for (;;) {
+    const tm = timeOf(raw);
+    const opts = [["✔ Done", "done"], [`⏱ Add active time${tm.active ? ` (now ${fmtDur(tm.active)})` : ""}`, "active"], [`⌛ Add passive time${tm.passive ? ` (now ${fmtDur(tm.passive)})` : ""}`, "passive"], [`≈ ${tm.est ? `Change estimate (${fmtDur(tm.est)})` : "Set estimate"}`, "est"]];
+    if (tm.active || tm.passive) opts.push(["Clear time spent", "reset"]);
+    const c = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), `⏱ ${desc}${timeText(tm) ? ` — ${timeText(tm)}` : ""}`);
+    if (c === null || c === undefined || c === "done") break;
+    let next = raw;
+    if (c === "active" || c === "passive") {
+      const m = await askDuration(env, c === "active" ? `⏱ Hands-on time to add to “${desc}” — e.g. 25m, 1h30m` : `⌛ Waiting / unattended time to add to “${desc}” — e.g. 2h`);
+      if (!m) continue;
+      next = addTime(raw, c, m);
+    } else if (c === "est") {
+      const m = await askDuration(env, `≈ Estimate for “${desc}” — e.g. 45m, 2h (empty = none)`, tm.est ? fmtDur(tm.est) : "");
+      if (m === undefined) continue;
+      next = setTime(raw, "est", m || null);
+    } else next = setTimes(raw, { active: null, passive: null });
+    if (next === raw) continue;
+    await editLines(app, path, (ls) => {
+      const i = locateRaw(ls, raw, hint);
+      if (i < 0) throw new Error("couldn't find the task any more — it may have been edited");
+      ls[i] = next; hint = i;
+    });
+    raw = next; changed = true;
+  }
+  if (changed) env.notice(`⏱ ${desc}: ${timeText(timeOf(raw)) || "no time logged"}`);
 }
 
 async function cmdPlan(env, forcedId) {
@@ -2019,7 +2336,7 @@ function classifyTasks(d, tasks) {
     const item = {
       path: t.path, line: t.line, text,
       desc: stripFields(splitMeta(text).head).replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2").replace(/^🎯\s*/u, "").trim(),
-      due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text),
+      due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text), time: timeOf(text), recurring: !!ruleOf(text),
     };
     const wt = weekTask.get(`${t.path}:${t.line}`);
     const firstDate = [getDate(text, "scheduled"), getDate(text, "due")].filter(Boolean).sort()[0];
@@ -2080,7 +2397,7 @@ function toTaskItem(d, t) {
   const today = d.today.format("YYYY-MM-DD");
   const it = { path: t.path, line: t.line, text, status: t.status,
     desc: stripFields(splitMeta(text).head).replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2").trim(),
-    due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text) };
+    due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text), time: timeOf(text), recurring: !!ruleOf(text) };
   it.overdue = isOpen(t) && (!!(it.due && it.due < today) || !!(it.scheduled && it.scheduled < today));
   return it;
 }
@@ -2092,10 +2409,17 @@ function taskRow(d, t, { showProject = true, done = false, keep = false } = {}) 
   if (p === "highest" || p === "high") chips.push(`<span class="pt-chip pt-chip-prio">${p === "highest" ? "🔺" : "⏫"}</span>`);
   if (t.scheduled) chips.push(chip("⏳", t.scheduled, t.scheduled < d.today.format("YYYY-MM-DD") ? "pt-chip-late" : ""));
   if (t.due) chips.push(chip("📅", t.due, t.due < d.today.format("YYYY-MM-DD") ? "pt-chip-late" : t.due === d.today.format("YYYY-MM-DD") ? "pt-chip-today" : ""));
+  const tm = t.time || {};
+  if (tm.est || tm.active || tm.passive) {
+    const over = tm.est && tm.active > tm.est;
+    const bits = [tm.active ? `⏱ ${fmtDur(tm.active)}` : "", tm.est ? `${tm.active ? "/ " : ""}≈ ${fmtDur(tm.est)}` : "", tm.passive ? `⌛ ${fmtDur(tm.passive)}` : ""].filter(Boolean);
+    chips.push(`<span class="pt-chip pt-chip-time${over ? " pt-chip-late" : ""}" title="${esc(timeText(tm))}">${esc(bits.join(" "))}</span>`);
+  }
   const proj = showProject ? (t.project ? link(t.project.path, t.group, "pt-task-proj") : `<span class="pt-task-proj">${esc(t.group)}</span>`) : "";
-  return `<div class="pt-task${t.overdue ? " is-overdue" : ""}${done ? " is-done" : ""}" data-path="${esc(t.path)}" data-line="${t.line}" data-text="${esc(t.text)}"${done || keep ? ' data-keep="1"' : ""}>
+  return `<div class="pt-task${t.overdue ? " is-overdue" : ""}${done ? " is-done" : ""}" data-path="${esc(t.path)}" data-line="${t.line}" data-text="${esc(t.text)}"${done || keep ? ' data-keep="1"' : ""}${tm.est ? ` data-est="${tm.est}"` : ""}${tm.active ? ` data-active="${tm.active}"` : ""}${t.recurring ? ' data-recurring="1"' : ""}>
     <input type="checkbox" class="task-list-item-checkbox pt-task-check" aria-label="Done"${done ? " checked" : ""}>
     <div class="pt-task-body"><span class="pt-task-text">${esc(t.desc || t.text)}</span><span class="pt-task-meta">${proj}${chips.join("")}</span></div>
+    <button class="pt-task-btn clickable-icon" data-act="time" title="Estimate and time spent" aria-label="Time">⏱</button>
     <button class="pt-task-btn clickable-icon" data-act="edit" title="Edit dates and priority" aria-label="Edit">✎</button>
     <button class="pt-task-btn clickable-icon" data-act="open" title="Open the note" aria-label="Open">↗</button>
   </div>`;
@@ -2283,7 +2607,7 @@ function renderWeek(d, path, opts = {}) {
   const state = w.status === "reviewed" ? "reviewed" : past ? "awaiting review" : isCur ? (daysLeft ? `${daysLeft} day${daysLeft > 1 ? "s" : ""} left` : "review tonight") : "upcoming";
   let h = `<div class="pt">`;
   const outside = opts.completions ? opts.completions[w.id] || 0 : null;
-  h += `<div class="pt-kpis">${kpi("Goals achieved", `${w.m.achieved}<span class="pt-of">/${w.m.goals}</span>`)}${kpi("Avg goal progress", w.m.avg === null ? "–" : `${w.m.avg}%`)}${kpi("Tasks done", `${w.m.done}<span class="pt-of">/${w.m.planned}</span>`)}${outside === null ? "" : kpi("Done outside goals", outside, "✅ elsewhere in the vault")}${mixKpi("Unplanned tasks", mixSum(d, [w.id]))}${routineKpi(d, w.id)}${kpi("Status", esc(state))}</div>`;
+  h += `<div class="pt-kpis">${kpi("Goals achieved", `${w.m.achieved}<span class="pt-of">/${w.m.goals}</span>`)}${kpi("Avg goal progress", w.m.avg === null ? "–" : `${w.m.avg}%`)}${kpi("Tasks done", `${w.m.done}<span class="pt-of">/${w.m.planned}</span>`)}${outside === null ? "" : kpi("Done outside goals", outside, "✅ elsewhere in the vault")}${mixKpi("Unplanned tasks", mixSum(d, [w.id]))}${timeKpi("Time", tSum(d, [w.id]))}${routineKpi(d, w.id)}${kpi("Status", esc(state))}</div>`;
   const btn = [];
   if (w.status !== "reviewed" && (isCur || past)) btn.push(["Weekly review", "Weekly review", true]);
   if (!past) btn.push(["Plan / add goals", "Plan week"], ["Plan a project", "Plan project"]);
@@ -2292,6 +2616,18 @@ function renderWeek(d, path, opts = {}) {
   h += weekTaskList(d, w);
   h += routineWeekCard(d, w.id);
   return h + `</div>`;
+}
+function timeBadge(a) {
+  if (!a.est && !a.active && !a.passive) return "";
+  const acc = tAcc(a);
+  return `<span class="pt-goal-time pt-muted" title="${esc(timeTitle(a))}">${a.active ? `⏱ ${fmtDur(a.active)}` : ""}${a.est ? ` / ≈ ${fmtDur(a.est)}` : ""}${a.passive ? ` · ⌛ ${fmtDur(a.passive)}` : ""}${acc !== null ? ` · <span class="${acc > 120 ? "pt-late" : ""}">${acc}% of est.</span>` : ""}</span>`;
+}
+const timeTitle = (a) => `estimated ${fmtDur(a.est) || "0m"} on ${a.estN}/${a.tasks} task(s) · active ${fmtDur(a.active) || "0m"} · passive ${fmtDur(a.passive) || "0m"}${a.doneN ? ` · done tasks with estimate and time: ${fmtDur(a.doneActive)} spent vs ${fmtDur(a.doneEst)} estimated` : ""}`;
+function timeKpi(label, a) {
+  if (!a.est && !a.active && !a.passive) return "";
+  const acc = tAcc(a);
+  return kpi(label, `${fmtDur(a.active) || "0m"}<span class="pt-of">${a.est ? ` / ≈ ${fmtDur(a.est)}` : ""}</span>`,
+    [a.passive ? `⌛ ${fmtDur(a.passive)} passive` : "", acc !== null ? `${acc}% of estimate on ${a.doneN} done` : "", `${a.estN}/${a.tasks} estimated`].filter(Boolean).join(" · "));
 }
 function mixKpi(label, a) {
   const tot = a.planned + a.unplanned;
@@ -2370,7 +2706,7 @@ function weekTaskList(d, w) {
     if (!gr.goal) badges.push(`<span class="pt-badge">no goal</span>`);
     h += `<div class="pt-card pt-wgroup${gr.score >= 100 && gr.counted ? " is-done" : ""}">
       <div class="pt-goal-head">${p ? link(p.path, gr.name, "pt-proj") : `<span class="pt-proj">${esc(gr.name)}</span>`}<span class="pt-goal-text">${gr.goal ? esc(gr.goal.text) : ""}</span>${badges.join("")}</div>
-      <div class="pt-goal-bar">${bar(gr.score)}<span class="pt-goal-num">${gr.score}%</span><span class="pt-goal-tasks">${gr.done}/${gr.counted} tasks</span></div>`;
+      <div class="pt-goal-bar">${bar(gr.score)}<span class="pt-goal-num">${gr.score}%</span><span class="pt-goal-tasks">${gr.done}/${gr.counted} tasks</span>${timeBadge(tSum(d, [w.id], gr.projectPath))}</div>`;
     const items = gr.here.filter((t) => t.status !== "-").map((t) => Object.assign(toTaskItem(d, t), { project: p, group: gr.name, isDone: isDone(t) }));
     const open = items.filter((t) => !t.isDone).sort((a, b) => (!!b.due - !!a.due) || String(a.due || "").localeCompare(String(b.due || "")) || String(a.scheduled || "9").localeCompare(String(b.scheduled || "9")) || PRIO_RANK[a.prio] - PRIO_RANK[b.prio]);
     const done = items.filter((t) => t.isDone);
@@ -2398,7 +2734,7 @@ function renderProject(d, path) {
   }
   let h = `<div class="pt">`;
   if (p.objective) h += `<div class="pt-objective">🎯 ${esc(p.objective)}</div>`;
-  h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone)}${mixKpi("Unplanned · 16 wks", mixSum(d, ids, p.path))}${kpi("Backlog", p.backlog.length)}</div>`;
+  h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone)}${mixKpi("Unplanned · 16 wks", mixSum(d, ids, p.path))}${timeKpi("Time · 16 wks", tSum(d, ids, p.path))}${kpi("Backlog", p.backlog.length)}</div>`;
   h += `<div class="pt-h">Focus · last 16 weeks</div><div class="pt-strip">${ids.map((id) => {
     const hs = p.history.filter((x) => x.week === id);
     const v = hs.length ? Math.round(mean(hs.map((x) => x.score))) : null;
@@ -2434,6 +2770,22 @@ function renderProject(d, path) {
   return h + `</div>`;
 }
 
+/** Estimates vs time spent: per week and per project, for tasks picked for a week. */
+function timeAnalytics(d, ids) {
+  const all = tSum(d, ids);
+  if (!all.est && !all.active && !all.passive) return "";
+  const pctCellT = (a) => { const v = tAcc(a); return `<td class="pt-num" title="${esc(timeTitle(a))}">${v === null ? `<span class="pt-muted">–</span>` : `<span class="pt-dot pt-${v <= 110 && v >= 80 ? "full" : v <= 130 && v >= 60 ? "mid" : "low"}"></span>${v}%`}</td>`; };
+  const row = (label, a) => `<tr><td>${label}</td><td class="pt-num">${a.estN}/${a.tasks}</td><td class="pt-num">${a.est ? fmtDur(a.est) : "–"}</td><td class="pt-num">${a.active ? fmtDur(a.active) : "–"}</td><td class="pt-num">${a.passive ? fmtDur(a.passive) : "–"}</td>${pctCellT(a)}</tr>`;
+  const head = (first) => `<thead><tr><th>${first}</th><th class="pt-num" title="tasks with an estimate / tasks picked">Estimated</th><th class="pt-num">≈ Estimate</th><th class="pt-num">⏱ Active</th><th class="pt-num">⌛ Passive</th><th class="pt-num" title="Hands-on time as % of the estimate, on done tasks that have both. 100% = spot on.">Actual / est.</th></tr></thead>`;
+  let h = `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Time · estimates vs spent</span><span class="pt-muted">${tAcc(all) === null ? "log time on done tasks to see how good your estimates are" : `overall ${tAcc(all)}% of estimate on ${all.doneN} done task(s)`}</span></div>`;
+  h += `<div class="pt-heat-wrap"><table class="pt-table">${head("Week")}<tbody>`;
+  for (const id of [...ids].reverse()) { const a = tSum(d, [id]); if (a.tasks && (a.est || a.active || a.passive)) { const w = d.weekMap.get(id); h += row(w && !w.virtual ? link(w.path, id) : id, a); } }
+  h += `</tbody></table></div>`;
+  const ps = d.projects.filter((p) => !p.routine).map((p) => [p, tSum(d, ids, p.path)]).filter(([, a]) => a.est || a.active || a.passive).sort((a, b) => b[1].active - a[1].active || a[0].name.localeCompare(b[0].name));
+  if (ps.length) h += `<div class="pt-heat-wrap"><table class="pt-table">${head("Project")}<tbody>${ps.map(([p, a]) => row(link(p.path, p.name), a)).join("")}</tbody></table></div>`;
+  return h + `</div>`;
+}
+
 function renderAnalytics(d, opts = {}) {
   const n = opts.weeks || 12;
   const ids = timeline(d, n, { trim: true });
@@ -2449,12 +2801,14 @@ function renderAnalytics(d, opts = {}) {
     h += kpi("Carried in", lw.m.carriedIn, lw.m.carriedIn ? "goals rolled over" : "");
     if (opts.completions) h += kpi("Done outside goals", opts.completions[lw.id] || 0, "✅ elsewhere in the vault");
     h += mixKpi("Unplanned tasks", mixSum(d, [lw.id]));
+    h += timeKpi("Time", tSum(d, [lw.id]));
     h += `</div>`;
   }
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Average goal score per week</span><span class="pt-legend"><i class="pt-lg-bar"></i>week <i class="pt-lg-line"></i>4-week trend</span></div>${chartScores(d, ids)}</div>`;
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Tasks done vs planned</span><span class="pt-legend"><i class="pt-lg-done"></i>done <i class="pt-lg-planned"></i>planned</span></div>${chartTasks(d, ids)}</div>`;
 
   h += routineAnalytics(d, ids);
+  h += timeAnalytics(d, ids);
 
   const rows = d.projects.filter((p) => !p.routine && (p.history.some((x) => ids.includes(x.week)) || p.status === "active"));
   rows.sort((a, b) => (b.focusWeeks - a.focusWeeks) || a.name.localeCompare(b.name));
@@ -2498,6 +2852,28 @@ function renderAnalytics(d, opts = {}) {
 }
 
 const PROJECTS_PATH = `${TRACKER_ROOT}/Projects.md`;
+/** Description + its rating, the model's suggestion, and a generated proposal, with buttons (handled in view.js). */
+function descCell(p, st) {
+  const btn = (act, label, title, cta = false) => `<button class="pt-mini${cta ? " mod-cta" : ""}" data-desc="${act}" data-path="${esc(p.path)}" title="${esc(title)}">${label}</button>`;
+  const write = btn("generate", "✨ Write", "Write a description with the local model from what's in the project's folder", !p.description);
+  let h = p.description ? `<div class="pt-muted pt-desc">${esc(p.description)}</div>` : `<div class="pt-muted pt-desc pt-warn">no description — the inbox model needs one</div>`;
+  const fresh = st && st.verdict && st.hash === descHash(p);
+  let badge = "";
+  if (fresh && st.verdict !== "missing") badge = `<span class="pt-q pt-q-${st.verdict}" title="checked ${esc(st.checked)}">${st.verdict === "good" ? "✓" : st.verdict === "fair" ? "~" : "!"} ${st.score}</span>`;
+  else if (st && st.verdict && p.description) badge = `<span class="pt-q pt-q-unchecked" title="the description changed since it was checked">changed</span>`;
+  h += `<div class="pt-desc-tools">${badge}${p.description ? btn("check", fresh ? "Re-check" : "Check", "Rate this description with the local model") : ""}${write}</div>`;
+  if (fresh && (st.issues.length || st.suggestion) && st.verdict !== "good" && st.verdict !== "missing") {
+    h += `<details class="pt-desc-more"><summary>${st.issues.length ? esc(st.issues[0]) : "Suggestion"}${st.issues.length > 1 ? ` <span class="pt-muted">+${st.issues.length - 1}</span>` : ""}</summary>`;
+    if (st.issues.length > 1) h += `<ul class="pt-list">${st.issues.slice(1).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+    if (st.suggestion) h += `<div class="pt-proposal"><div>💡 ${esc(st.suggestion)}</div>${btn("use-suggestion", "Use this", "Save as the project's description")}</div>`;
+    h += `</details>`;
+  }
+  if (st && st.proposal) {
+    const pr = st.proposal;
+    h += `<div class="pt-proposal"><div>✨ ${esc(pr.description)}</div>${pr.keywords && pr.keywords.length ? `<div class="pt-muted">keywords: ${esc(pr.keywords.join(", "))}${p.keywords.length ? " (yours are kept)" : ""}</div>` : ""}<div>${btn("use-proposal", "Use it", "Save as the project's description", true)}${btn("dismiss", "Dismiss", "Throw this proposal away")}${btn("generate", "↻ Again", "Write another one")}</div></div>`;
+  }
+  return h;
+}
 const STATUSES = ["active", "backlog", "done"];
 function selectHtml(path, key, value, options, labels = {}) {
   const opts = options.includes(value) ? options : [value, ...options];
@@ -2505,6 +2881,7 @@ function selectHtml(path, key, value, options, labels = {}) {
 }
 /** Tracker/Projects: every project, with priority and status you can change right here. */
 function renderProjects(d) {
+  const store = d.descStore || {};
   let h = `<div class="pt">`;
   const work = d.projects.filter((p) => !p.routine);
   if (!work.length) return h + `<div class="pt-empty">No projects yet — run <b>Register projects</b>.</div></div>`;
@@ -2512,6 +2889,9 @@ function renderProjects(d) {
   const inWeek = (w, p) => !!(w && (w.goals.some((g) => g.projectPath === p.path) || (w.extra || []).some((x) => x.projectPath === p.path)));
   const counts = PROJECT_PRIOS.map((k) => `${PRIO_LABEL[k]}: ${work.filter((p) => p.status === "active" && p.priority === k).length}`).join(" · ");
   h += `<div class="pt-summary">${work.filter((p) => p.status === "active").length} active (${counts}) · ${work.filter((p) => p.status === "backlog").length} backlog · Plan week lists projects by priority.</div>`;
+  const live = work.filter(liveStatus), stOf = (p) => { const st = store[p.path]; return st && st.verdict && st.hash === descHash(p) ? st.verdict : p.description ? "unchecked" : "missing"; };
+  const dc = (v) => live.filter((p) => stOf(p) === v).length;
+  h += `<div class="pt-desc-bar"><span>Descriptions <span class="pt-muted">(the inbox model sorts notes by them)</span>: ${[["good", "✓ good"], ["fair", "could be better"], ["weak", "weak"], ["missing", "missing"], ["unchecked", "not checked"]].filter(([v]) => dc(v)).map(([v, l]) => `<span class="pt-q pt-q-${v}">${dc(v)} ${l}</span>`).join(" ")}</span>${dc("unchecked") + live.filter((p) => store[p.path] && store[p.path].verdict && store[p.path].hash !== descHash(p)).length ? `<button class="pt-mini mod-cta" data-desc="check-all">Check descriptions</button>` : `<button class="pt-mini" data-desc="recheck-all">Check all again</button>`}</div>`;
   const groups = [["Active", work.filter((p) => p.status === "active")], ["Backlog", work.filter((p) => p.status === "backlog")], ["Other", work.filter((p) => !["active", "backlog"].includes(p.status))]];
   const multiScope = new Set(work.map((p) => p.scope)).size > 1;
   for (const [title, ps] of groups) {
@@ -2520,7 +2900,7 @@ function renderProjects(d) {
     h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">${title}</span><span class="pt-count">${ps.length}</span></div><div class="pt-heat-wrap"><table class="pt-table pt-projects"><thead><tr><th>Project</th>${multiScope ? "<th>Scope</th>" : ""}<th>Priority</th><th>Status</th><th>This / next week</th><th>Last focus</th><th class="pt-num">Avg</th><th class="pt-num">Backlog</th></tr></thead><tbody>`;
     for (const p of ps) {
       const wk = [inWeek(cur, p) ? "this" : "", inWeek(next, p) ? "next" : ""].filter(Boolean).join(" + ");
-      h += `<tr class="pt-prio-${p.priority}"><td>${link(p.path, p.name)}${p.description ? `<div class="pt-muted pt-desc">${esc(p.description)}</div>` : `<div class="pt-muted pt-desc pt-warn">no description — the inbox model needs one</div>`}</td>`
+      h += `<tr class="pt-prio-${p.priority}"><td>${link(p.path, p.name)}${descCell(p, store[p.path])}</td>`
         + `${multiScope ? `<td class="pt-muted">${esc(p.scope)}</td>` : ""}<td>${selectHtml(p.path, "priority", p.priority, PROJECT_PRIOS, PRIO_LABEL)}</td><td>${selectHtml(p.path, "status", p.status, STATUSES)}</td>`
         + `<td>${wk ? `🎯 ${wk}` : `<span class="pt-muted">–</span>`}</td><td class="${p.status === "active" && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks) ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td>`
         + `<td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.backlog.length}</td></tr>`;
@@ -2548,13 +2928,13 @@ async function render(app, mode, path, opts = {}) {
   if (mode === "week") return renderWeek(d, path, opts);
   if (mode === "project") return renderProject(d, path);
   if (mode === "analytics") return renderAnalytics(d, opts);
-  if (mode === "projects") return renderProjects(d);
+  if (mode === "projects") { d.descStore = await loadDescStore(app); return renderProjects(d); }
   return `<div class="pt-empty">Unknown mode: ${esc(mode)}</div>`;
 }
 
 /* ------------------------------------------------------------------ entry */
 
-const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
+const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
 
 async function ptrack(tp, cmd, ...args) {
   const app = tp.app || window.app;
@@ -2576,7 +2956,8 @@ async function run(env, cmd, ...args) {
 module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
-  getConfig, loadAll, render, run, Cancelled, Handoff, inboxFree, normalizeExtraction, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  getConfig, loadAll, render, run, makeEnv, descAction, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
+  parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeExtraction, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, classifyMessages, extractJson, stripThink,
 };

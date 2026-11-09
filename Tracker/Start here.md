@@ -22,8 +22,8 @@ Settings → Community plugins → Browse. Install and enable:
 - Settings → Dataview → turn on **Enable JavaScript queries**.
 
 **Templater**
-- Settings → Templater → **Template hotkeys** → add these eight files, one per row:
-  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
+- Settings → Templater → **Template hotkeys** → add these nine files, one per row:
+  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
 - That's all. You do **not** need to set a template folder or a script folder.
 - Optional: Settings → Hotkeys → search "Tracker/Commands" to give them keyboard shortcuts.
 
@@ -44,7 +44,7 @@ Settings → Community plugins → Browse. Install and enable:
    - Folders you mark *Not a project* are remembered (`ignored_folders` in Config) and not asked about again.
    - Safe to run again later — it only asks about new folders.
 3. Give each active project a one-line **description** (note properties). The inbox classifier reads these; good descriptions matter more than the model.
-   Then open `Tracker/Projects` and set each project's **priority** (high / medium / low) and status with the dropdowns.
+   Then open `Tracker/Projects` and set each project's **priority** (high / medium / low) and status with the dropdowns. Once the local model runs (next step), press **Check descriptions** there: the inbox model sorts notes by these descriptions, so weak ones are worth fixing (**✨ Write** drafts one from the project's folder).
 4. Click **Plan week**.
 
 ## 4. Local LLM on the Mac (Ollama)
@@ -159,6 +159,14 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
 
 **During the week — Add tasks.** Something came up? **Add tasks** (Home, the week note or the project page) works like Plan project for *this* week — type new tasks or pick them from the backlog, with ⏳ and 📅 — but they go to the project's `## Unplanned` section and get `[unplanned:: 2026-W46]`. Nothing is tidied first (open Planned tasks aren't asked about, done ones stay where they are). Unplanned tasks show up and count exactly like planned ones; only Analytics tells them apart: the week note and Analytics show how many tasks were unplanned, and the Projects table has a *Planned / unplanned* split per project. If the review carries an unplanned task to next week, it moves to `## Planned` (it's planned now); the marker stays, so the week it was added still counts it as unplanned.
 
+**During the week — time.** Every task can carry an estimate and the time it really took:
+- `[est:: 2h]` — how long you expect the hands-on work to take. Planning asks for it after the dates (turn off with `plan_estimates`); the task pickers show the running total, e.g. *✔ Done — 4 task(s) planned for W46 · ≈ 6h estimated*.
+- `[active:: 1h30m]` — hands-on time you actually spent.
+- `[passive:: 3h]` — time the task took without needing you: paint drying, waiting for a reply, a long upload. It's tracked apart so it doesn't spoil your estimates.
+- To log time: the **⏱** button on any task row (Home, week note) opens a small form with *+15m / +30m / +1h / +2h* buttons; or put the cursor on a task and run **Log time** (without a task under the cursor it lets you pick one of this or last week's tasks). Ticking a task that has an estimate asks right away how long it took — Cancel skips it (`log_time_on_done`).
+- Durations: `45m`, `2h`, `1h30m`, `1.5h`, `1:30`; a plain number is minutes.
+- The week note shows *Time* (active vs estimate, passive, and how close your estimates were on done tasks); each goal shows its own; the project page shows the last 16 weeks; Analytics has a **Time · estimates vs spent** table per week and per project. *Actual / est.* = hands-on time ÷ estimate on done tasks that have both: 100% is spot on, 150% means things take you 1.5× longer than you think.
+
 **Sunday — Weekly review.** For each goal: achieved / partly (%) / missed, and the main reason it fell short. Unfinished tasks: **plan them for next week** (their week marker changes; the goal is carried too), **return them to the backlog**, or **drop** them. Projects with picked tasks but no goal are asked about the same way. Finished tasks move from `## Planned` to a `## Done` section in each project note. Then wins, lessons, energy 1–5, and an optional short summary from the local model. It ends by offering to plan next week.
 
 ## 8. Routines
@@ -183,6 +191,8 @@ Recurring routines live in **routine projects** — one per scope, e.g. `Project
 ## 9. What you see
 
 - **Projects** (`Tracker/Projects`): every project grouped by status and ordered by priority, with dropdowns to change **priority** and **status** (saved in the project's properties), whether it's in this / next week's plan, last focus, average score and backlog size; routine projects in their own table. **Plan week** lists projects by priority (then the longest without focus), and *Needs attention* puts high-priority projects first.
+  - **Description quality** (needs the local model): **Check descriptions** has the model rate every new or changed description from 0 to 100 — is it clear, distinct from your other projects, concrete, short — and gives a badge (✓ good · ~ could be better · ! weak), the main problems and a better wording you can take with **Use this**. **Check** / **Re-check** rates one project. Edit a description and its badge turns to *changed* until you check it again.
+  - **✨ Write** drafts a description (and keywords, if the project has none) from what's in the project's folder: the project note and the other notes and file names in its folder, about 6,000 characters. Nothing is saved until you press **Use it**; **Dismiss** throws it away, **↻ Again** writes another. Ratings and drafts are kept in `Tracker/AI/descriptions.json`.
 - **Home**: buttons, this week's goals with progress, focus tasks (today / later this week / any day), the *Outside this week's focus* box, inbox count, 8-week momentum, what needs attention.
 - **Week note**: goals achieved, average progress, tasks done, done outside goals; then every goal with its bar and all the tasks picked for it (tick / edit / open right there).
 - **Project note**: objective, weeks in focus, average goal score, a 16-week focus strip, a **Planned** card (this week / next week: goal and tasks done) with a *Pick tasks* button, recent goals with scores and reasons. The tasks themselves are in the note's `## Planned` section.
@@ -212,6 +222,7 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - `[from:: …]` = weeks it was planned for before and moved on from. Those weeks count it as *planned, not done*, so your history stays honest.
 - `🎯` lines are goals (not tasks, so they don't show up in Tasks lists). `result` and `miss` are written by the review.
 - A `[-]` task = dropped; it doesn't count. Week notes from older versions with tasks nested under goals still work.
+- `[est:: 2h]`, `[active:: 1h30m]`, `[passive:: 3h]` = estimate, hands-on time spent, unattended time. Count for the week the task is planned for.
 - `[unplanned:: 2026-W46]` = added during that week with **Add tasks** (lives in `## Unplanned` until the review moves it on).
 - Routine occurrences: `[missed:: yes]` on a `[-]` line = missed (counts against the routine score); `[-]` without it = skipped.
 - Project properties: `type: project`, `status: active | backlog | done`, `priority: high | medium | low` (unset = medium), `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.

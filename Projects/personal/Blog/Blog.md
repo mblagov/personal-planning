@@ -14,9 +14,9 @@ await dv.view("Tracker/Views/tracker", {mode: "project"})
 ```
 
 ## Planned
-- [x] Outline the Obsidian planning post [week:: 2026-W46] [from:: 2026-W45] ✅ 2026-11-09
-- [ ] Write the first draft [week:: 2026-W46] ⏳ 2026-11-11
-- [ ] Make 3 screenshots of the dashboards [week:: 2026-W46] ⏳ 2026-11-12
+- [x] Outline the Obsidian planning post [week:: 2026-W46] [from:: 2026-W45] [est:: 1h] [active:: 1h30m] ✅ 2026-11-09
+- [ ] Write the first draft [week:: 2026-W46] [est:: 3h] [active:: 1h] ⏳ 2026-11-11
+- [ ] Make 3 screenshots of the dashboards [week:: 2026-W46] [est:: 30m] ⏳ 2026-11-12
 - [ ] Publish and share the post [week:: 2026-W46] 📅 2026-11-15
 
 ## Backlog
@@ -28,4 +28,4 @@ await dv.view("Tracker/Views/tracker", {mode: "project"})
 - 💡 Series idea: one post per month on tools I actually use
 
 ## Done
-- [x] Pick the topic for the November post [week:: 2026-W45] ✅ 2026-11-03
+- [x] Pick the topic for the November post [week:: 2026-W45] [est:: 30m] [active:: 25m] ✅ 2026-11-03

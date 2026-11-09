@@ -14,7 +14,7 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 │   ├── Start here.md         # full setup guide and user manual
 │   ├── Home.md               # main dashboard: today, this week, attention
 │   ├── Analytics.md          # 12-week trends, heatmap, miss reasons
-│   ├── Projects.md           # all projects: set priority and status
+│   ├── Projects.md           # all projects: priority, status, description quality
 │   ├── Config.md             # all settings (frontmatter)
 │   ├── Inbox.md              # capture: tasks or any free text
 │   ├── Commands/             # Templater entry points (one per command)
@@ -38,7 +38,7 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 
 - [Obsidian](https://obsidian.md) with these community plugins:
   - **Dataview**, with *Enable JavaScript queries* turned on
-  - **Templater**: add the eight files in `Tracker/Commands/` under *Template hotkeys*
+  - **Templater**: add the nine files in `Tracker/Commands/` under *Template hotkeys*
   - **Tasks**: keep *Set done date on every completed task* on
 - Optional: a local model for sorting the inbox
   - Mac: [Ollama](https://ollama.com) (`ollama pull qwen2.5:7b-instruct`) or LM Studio
@@ -73,7 +73,7 @@ The script shows its plan and asks before changing anything. It remembers the va
 
 | Files in the vault | What the script does |
 |---|---|
-| `Tracker/Scripts/`, `Views/`, `Commands/`, `Start here.md`, `Home.md`, `Analytics.md` | Replaces them with the repo's version |
+| `Tracker/Scripts/`, `Views/`, `Commands/`, `Start here.md`, `Home.md`, `Analytics.md`, `Projects.md` | Replaces them with the repo's version |
 | `Tracker/Config.md` | Merges it. Your values stay, new settings are added with their defaults, and the help text is updated. |
 | `Tracker/Inbox.md` | Creates it only if it's missing. It never overwrites it. |
 | `Tracker/Weeks/`, `Tracker/AI/`, your projects, all other notes | Never touches them |
@@ -93,10 +93,11 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 |---|---|---|
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
 | When convenient | **Process inbox** | The local LLM reads the whole inbox note. It splits free text (notes, ideas, links) into separate items and keeps the original in `Inbox archive.md`. It then suggests a project, a type (task / idea / reference), and a priority for each item. Confident items are filed automatically. |
-| Anytime | **Projects** note | Set each project's priority (high / medium / low) and status. **Plan week** lists projects by priority. |
+| Anytime | **Projects** note | Set each project's priority (high / medium / low) and status. **Plan week** lists projects by priority. The local LLM can rate each description (the inbox sorter relies on them) and draft one from the project's folder. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
 | During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
 | During the week | **Add tasks** | Adds tasks that came up to this week, in the project's `## Unplanned` section. They count like planned ones; Analytics shows the planned/unplanned split. |
+| During the week | **Log time** / ⏱ | Logs hands-on (`active`) and unattended (`passive`) time on a task. Planning asks for an estimate (`est`). Week notes, project pages and Analytics compare estimates with time spent. |
 | Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records the week's routine score, wins, lessons, and energy. |
 | Anytime | **New project**, **Register projects** | Adds projects |
 
@@ -138,6 +139,7 @@ keywords: [boat, marina, berth]
 - `[from:: …]` lists the earlier weeks a task or goal was carried over from. Those weeks count it as planned but not done.
 - `[result:: 0–100]` and `[miss:: no-time | blocked | deprioritized | underestimated | motivation | unclear]` are written by the weekly review.
 - `[-]` marks a dropped task, which doesn't count toward any score.
+- `[est:: 2h]` is the estimate of hands-on time; `[active:: 1h30m]` and `[passive:: 3h]` are the time spent working on it and the time it took without you (waiting, drying). Durations: `45m`, `2h`, `1h30m`, `1:30`.
 - Every task the tracker adds gets a ➕ created date: the capture date for inbox items, today for tasks typed while planning.
 - Dates use the Tasks plugin's emoji: 📅 due, ⏳ scheduled, 🛫 start, ➕ created, ✅ done. Priorities use ⏫ 🔼 🔽.
 
@@ -146,8 +148,8 @@ keywords: [boat, marina, berth]
 | Project | Scope | Status | Shows |
 |---|---|---|---|
 | Sailing | personal | active | A goal carried over from W45, a mix of done and open tasks, and a filled `## Done` |
-| Blog | personal | active | A four-task goal with a deadline at the end of the week |
-| Home renovation | common | active | A high-priority task due mid-week |
+| Blog | personal | active | A four-task goal with a deadline at the end of the week; estimates and time spent on its tasks |
+| Home renovation | common | active | A high-priority task due mid-week, and a second note in its folder for **✨ Write** to read |
 | Family trip | common | active | Not in this week's focus. A backlog task due soon appears in the *Outside focus* box. |
 | Spanish | personal | backlog | A parked project with only backlog items |
 | Personal routines | personal | routine | Daily, weekly and monthly routines with three weeks of done and missed history |

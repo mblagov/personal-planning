@@ -26,4 +26,4 @@ await dv.view("Tracker/Views/tracker", {mode: "project"})
 - 📎 Kitchen measurements: 3.2 m × 2.6 m, window on the north wall
 
 ## Done
-- [x] Sign the contract with the kitchen contractor [week:: 2026-W45] ✅ 2026-11-05
+- [x] Sign the contract with the kitchen contractor [week:: 2026-W45] [est:: 1h] [active:: 1h15m] [passive:: 3h] ✅ 2026-11-05
