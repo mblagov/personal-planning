@@ -119,6 +119,28 @@ function timeDialog(core, title, text, hint) {
   });
 }
 
+/** Confirm a cancellation, with an optional reason. Resolves the reason ("" = none), or null when the user keeps the task. */
+function cancelDialog(title) {
+  return new Promise((resolve) => {
+    if (!obsidian || !obsidian.Modal) { resolve(window.confirm(`Cancel “${title}”?`) ? "" : null); return; }
+    const modal = new obsidian.Modal(obsApp);
+    let result = null;
+    modal.titleEl.setText(`✖ Cancel “${title}”?`);
+    const el = modal.contentEl;
+    el.addClass("pt-time-modal");
+    el.innerHTML = `<div class="pt-muted pt-hint">It won't count as done or as planned, leaves your lists and moves to “Done” as cancelled. Analytics counts it as cancelled.</div>
+      <div class="pt-time-field"><label><b>Reason</b><span class="pt-muted">optional</span></label><div class="pt-time-input"><input type="text" data-k="reason" placeholder="e.g. not needed any more"></div></div>
+      <div class="pt-actions"><button class="mod-warning" data-ok="1">Cancel task</button><button data-keep="1">Keep it</button></div>`;
+    const inp = el.querySelector("input");
+    const ok = () => { result = inp.value.trim(); modal.close(); };
+    el.querySelector("[data-ok]").addEventListener("click", ok);
+    el.querySelector("[data-keep]").addEventListener("click", () => modal.close());
+    inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); ok(); } });
+    modal.onClose = () => resolve(result);
+    modal.open();
+    setTimeout(() => inp.focus(), 30);
+  });
+}
 
 const root = dv.el("div", "", { cls: "pt-root" });
 try {
@@ -222,6 +244,24 @@ try {
           await obsApp.workspace.openLinkText(row.dataset.path, "", false, { eState: { line: Number(row.dataset.line) } });
           notify("Put the cursor on the task and run “Tasks: Create or edit task”.");
         }
+      });
+      const cancel = row.querySelector('[data-act="cancel"]');
+      if (cancel) cancel.addEventListener("click", async () => {
+        const title = (row.querySelector(".pt-task-text") || {}).textContent || "Task";
+        const reason = await cancelDialog(title);
+        if (reason === null) return;
+        const file = obsApp.vault.getAbstractFileByPath(row.dataset.path);
+        if (!file) { notify("Couldn't find that note any more."); return; }
+        const lines = (await obsApp.vault.read(file)).split("\n");
+        const i = locate(lines, Number(row.dataset.line), row.dataset.text);
+        if (i < 0) { notify("Couldn't find that task any more — it may have been edited."); return; }
+        try {
+          const r = await core.cancelTask(obsApp, row.dataset.path, lines[i], i, window.moment().format("YYYY-MM-DD"), reason);
+          if (!r.ok) { notify("That task isn't open any more."); return; }
+          if (r.next) notify("Cancelled — the next occurrence is scheduled.");
+          row.classList.add("is-cancelled");
+          if (mode === "home") setTimeout(() => row.remove(), 500); else await draw();
+        } catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
       });
       row.querySelector('[data-act="open"]').addEventListener("click", () => {
         obsApp.workspace.openLinkText(row.dataset.path, "", false, { eState: { line: Number(row.dataset.line) } });

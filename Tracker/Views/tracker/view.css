@@ -174,3 +174,8 @@
 .pt-goal:hover .pt-move, .pt-move:focus-within { opacity: 1; }
 .pt-move button[disabled] { visibility: hidden; }
 @media (hover: none) { .pt-move { opacity: 1; } }
+
+/* Cancelled tasks */
+.pt-task.is-cancelled { opacity: 0.4; text-decoration: line-through; transition: opacity 0.3s; }
+.pt-task-btn[data-act="cancel"]:hover { color: var(--text-error); }
+.pt-cancelled s { color: var(--text-muted); }

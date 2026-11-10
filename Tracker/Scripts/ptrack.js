@@ -137,6 +137,8 @@ const isOpen = (t) => t.status === " " || t.status === "/";
 /** A task moved to another week / back to the backlog: cancelled in Tasks, but still counts as planned-not-done. */
 const isMoved = (t) => t.status === "-" && /⇢/.test(t.body || "");
 const countsAsPlanned = (t) => t.status !== "-" || isMoved(t);
+/** Cancelled on purpose (Cancel task, or dropped in the review): not done, not planned — left out of every score. */
+const isCancelled = (t) => t.status === "-" && !isMoved(t) && !/\[missed::/i.test(String(t.raw || t.body || ""));
 
 /* Tasks plugin signifiers. Tasks reads them from the END of the line, so anything we add goes before them. */
 const SIG_RE = /(?:📅|🗓️?|⏳|⌛|🛫|➕|✅|❌|🔁|⏫|🔼|🔽|🔺|⏬|🆔|⛔|🏁)/u;
@@ -682,13 +684,14 @@ function attachSelections(w, m2, byPath) {
     g.tasks = [...g.legacy, ...g.here];
     g.counted = [...g.legacy.filter(countsAsPlanned), ...g.here.filter((t) => t.status !== "-"), ...g.carriedOut];
     g.doneCount = g.legacy.filter(isDone).length + g.here.filter(isDone).length;
+    g.cancelled = [...g.legacy, ...g.here].filter(isCancelled);
     g.score = goalScore(g);
   }
   w.extra = [];
   if (m2) for (const [pp, b] of m2) {
     if (used.has(pp)) continue;
     w.extra.push({ projectPath: pp, projectName: byPath.get(pp)?.name || pp, here: b.here, carriedOut: b.carried,
-      counted: [...b.here.filter((t) => t.status !== "-"), ...b.carried], doneCount: b.here.filter(isDone).length });
+      counted: [...b.here.filter((t) => t.status !== "-"), ...b.carried], doneCount: b.here.filter(isDone).length, cancelled: b.here.filter(isCancelled) });
   }
 }
 function goalScore(g) {
@@ -709,6 +712,7 @@ function computeStats(d) {
       planned: sum(gs.map((g) => g.counted.length)) + sum((w.extra || []).map((x) => x.counted.length)),
       done: sum(gs.map((g) => g.doneCount)) + sum((w.extra || []).map((x) => x.doneCount)),
       carriedIn: gs.filter((g) => g.fields.from).length,
+      cancelled: sum(gs.map((g) => g.cancelled.length)) + sum((w.extra || []).map((x) => x.cancelled.length)),
     };
   }
   d.weekMap = new Map(d.weeks.map((w) => [w.id, w]));
@@ -717,8 +721,8 @@ function computeStats(d) {
   for (const [wid, m2] of d.sel) {
     const pm = new Map();
     for (const [pp, b] of m2) {
-      const a = { planned: 0, unplanned: 0, plannedDone: 0, unplannedDone: 0 };
-      for (const t of b.here) { if (t.status === "-") continue; const k = isUnplannedIn(t, wid) ? "unplanned" : "planned"; a[k]++; if (isDone(t)) a[k + "Done"]++; }
+      const a = { planned: 0, unplanned: 0, plannedDone: 0, unplannedDone: 0, cancelled: 0 };
+      for (const t of b.here) { if (isCancelled(t)) a.cancelled++; if (t.status === "-") continue; const k = isUnplannedIn(t, wid) ? "unplanned" : "planned"; a[k]++; if (isDone(t)) a[k + "Done"]++; }
       for (const t of b.carried) a[isUnplannedIn(t, wid) ? "unplanned" : "planned"]++; // planned that week, moved on: not done
       pm.set(pp, a);
     }
@@ -2353,6 +2357,73 @@ async function cmdLogTime(env) {
   if (changed) env.notice(`⏱ ${desc}: ${timeText(timeOf(raw)) || "no time logged"}`);
 }
 
+/* ------------------------------------------------------------------ cancel a task */
+
+/** `[-]` + ❌ today (+ an optional [reason:: …]); no done date. */
+function cancelLine(line, today, reason) {
+  let out = setDate(setDate(setStatus(line, "-"), "done", null), "cancelled", today);
+  if (reason) out = setField(out, "reason", oneLine(reason).replace(/[\[\]]/g, ""));
+  return out;
+}
+const CANCEL_FROM = [PLANNED_SEC, UNPLANNED_SEC, "Backlog"];
+/**
+ * Cancel the task at `raw` (near line `hint`) in `path`. A repeating task gets its next occurrence (the cancelled one stays
+ * below it, like a skipped routine); any other top-level task in Planned / Unplanned / Backlog moves, with its sub-items,
+ * to ## Done, so it leaves every list. Returns { ok, moved, next }.
+ */
+async function cancelTask(app, path, raw, hint, today, reason = "") {
+  const res = { ok: false, moved: false, next: false };
+  await editLines(app, path, (ls) => {
+    const k = locateRaw(ls, raw, hint);
+    if (k < 0) return;
+    const it = parseItems(ls, k, k + 1)[0];
+    if (!it || !it.task || !isOpen(it)) return;
+    const gone = cancelLine(ls[k], today, reason);
+    const rule = ruleOf(ls[k]), ref = refDate(ls[k]);
+    const nextIso = rule && ref ? (/\bwhen done\s*$/i.test(rule) ? today : nextOccurrence(rule, ref)) : null;
+    res.ok = true;
+    if (nextIso) { ls.splice(k, 1, shiftOccurrence(ls[k], isoDiff(ref, nextIso), today), gone); res.next = true; return; }
+    ls[k] = gone;
+    const all = parseItems(ls), me = all.find((x) => x.line === k);
+    const sec = CANCEL_FROM.map((n) => findSection(ls, n)).find((x) => x && k >= x.start && k < x.end);
+    if (!me || me.parent || !sec) return;
+    const end = blockEnd(ls, me);
+    const block = dedent(ls.slice(k, end), me.ws).filter((l) => l.trim() !== "");
+    ls.splice(k, end - k);
+    insertIntoSection(ls, DONE_SEC, block);
+    res.moved = true;
+  });
+  return res;
+}
+/** Cancel task: the task under the cursor, or one picked from this / next week. Asks for an optional reason. */
+async function cmdCancelTask(env) {
+  const { app } = env;
+  let path = null, raw = null, hint;
+  const ae = app.workspace && app.workspace.activeEditor;
+  if (ae && ae.editor && ae.file) {
+    const ln = ae.editor.getCursor().line, txt = ae.editor.getLine(ln);
+    if (/^\s*(?:[-*+]|\d+[.)])\s+\[[ /]\]/.test(txt)) { path = ae.file.path; raw = txt; hint = ln; }
+  }
+  if (!path) {
+    const d = await loadAll(app);
+    const ts = [];
+    for (const wid of [d.curId, shiftWeek(d.curId, 1)]) {
+      const m2 = d.sel.get(wid);
+      if (m2) for (const [pp, b] of m2) for (const t of b.here) if (isOpen(t)) ts.push({ t, wid, p: d.byPath.get(pp) });
+    }
+    if (!ts.length) throw new Error("no open tasks planned for this or next week — put the cursor on a task line and run Cancel task again");
+    ts.sort((a, b) => a.wid.localeCompare(b.wid) || (a.p ? a.p.name : "").localeCompare(b.p ? b.p.name : ""));
+    const c = await ask(env, ts.map((x) => `${taskDesc(x.t.raw)}  ·  ${x.p ? x.p.name : ""} · ${shortWeek(x.wid)}`), ts, "✖ Cancel which task? It won't count as done or as planned.");
+    path = c.t.path; raw = c.t.raw; hint = c.t.line;
+  }
+  const desc = taskDesc(raw);
+  const reason = await env.prompt(`✖ Cancel “${desc}” — why? (optional; Esc = keep the task)`, "");
+  if (reason === null || reason === undefined) throw new Cancelled();
+  const r = await cancelTask(app, path, raw, hint, env.moment().format("YYYY-MM-DD"), reason);
+  if (!r.ok) throw new Error("couldn't find the open task any more — it may have been edited");
+  env.notice(`✖ Cancelled “${desc}”${r.next ? " — the next occurrence is scheduled" : r.moved ? ` — moved to “${DONE_SEC}”` : ""}. It's left out of the scores.`);
+}
+
 async function cmdPlan(env, forcedId) {
   const { app } = env, cfg = getConfig(app);
   await rollRoutinesNotice(env);
@@ -2453,7 +2524,7 @@ async function applyTaskAction(app, tasks, action, id, nextId) {
     await editLines(app, t.path, (ls) => {
       const k = locateRaw(ls, t.raw, t.line);
       if (k < 0) return;
-      if (action === "drop") { ls[k] = setStatus(ls[k], "-"); n++; return; }
+      if (action === "drop") { ls[k] = cancelLine(ls[k], getMoment()().format("YYYY-MM-DD")); n++; return; }
       let line = setField(ls[k], "from", addFrom(t.fields.from, id));
       line = setDate(line, "scheduled", null);
       const inUnpl = !!t.inUnplanned;
@@ -2480,7 +2551,7 @@ async function applyTaskAction(app, tasks, action, id, nextId) {
 /** Was task t added outside the plan in week wid? (marker, or written in ## Unplanned for that week) */
 function isUnplannedIn(t, wid) { return (t.unplannedIn || []).includes(wid) || (!!t.inUnplanned && t.week === wid && !(t.unplannedIn || []).length); }
 function mixSum(d, ids, pp = null) {
-  const a = { planned: 0, unplanned: 0, plannedDone: 0, unplannedDone: 0 };
+  const a = { planned: 0, unplanned: 0, plannedDone: 0, unplannedDone: 0, cancelled: 0 };
   for (const id of ids) {
     const pm = d.mix.get(id);
     if (!pm) continue;
@@ -2614,7 +2685,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
           copy = withCreated(copy, env.moment().format("YYYY-MM-DD"));
           legacyCopies.push(action === "carry" ? setField(copy, "week", nextId) : copy);
           ls[t.line] = insertBeforeMeta(setStatus(ls[t.line], "-"), action === "carry" ? `⇢ [[${nextId}]]` : "⇢ backlog");
-        } else if (action === "drop") ls[t.line] = setStatus(ls[t.line], "-");
+        } else if (action === "drop") ls[t.line] = cancelLine(ls[t.line], getMoment()().format("YYYY-MM-DD"));
       }
     });
     if (g.projectPath && legacyCopies.length) await editLines(app, g.projectPath, (ls) => insertIntoProjectSection(ls, action === "carry" ? PLANNED_SEC : "Backlog", legacyCopies));
@@ -2657,7 +2728,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
   if (wantAi) {
     try {
       const w = (await loadAll(app)).weekMap.get(id);
-      const facts = w.goals.map((g) => `- ${g.projectName}: "${g.text}" → ${g.score}%${g.fields.miss ? ` (reason: ${g.fields.miss})` : ""}; tasks done ${g.doneCount}/${g.counted.length}`).join("\n");
+      const facts = w.goals.map((g) => `- ${g.projectName}: "${g.text}" → ${g.score}%${g.fields.miss ? ` (reason: ${g.fields.miss})` : ""}; tasks done ${g.doneCount}/${g.counted.length}${g.cancelled.length ? `, ${g.cancelled.length} cancelled` : ""}`).join("\n");
       const msg = `Here is my week ${id}:\n${facts}${rLine ? `\nRoutines: ${rLine}` : ""}\nWins: ${wins || "-"}\nObstacles: ${lessons || "-"}\nEnergy (1-5): ${energy || "-"}\n\nWrite 2–3 plain sentences: what the week was really about, the pattern behind what slipped, and one concrete adjustment for next week. Be direct, no praise, no bullet points.`;
       const sm = oneLine(await llmChat(env, cfg, [{ role: "user", content: msg }]));
       if (sm) fields.push(`- Summary:: ${sm}`);
@@ -2803,6 +2874,7 @@ function taskRow(d, t, { showProject = true, done = false, keep = false } = {}) 
     <div class="pt-task-body"><span class="pt-task-text">${esc(t.desc || t.text)}</span><span class="pt-task-meta">${proj}${chips.join("")}</span></div>
     <button class="pt-task-btn clickable-icon" data-act="time" title="Estimate and time spent" aria-label="Time">⏱</button>
     <button class="pt-task-btn clickable-icon" data-act="edit" title="Edit dates and priority" aria-label="Edit">✎</button>
+    ${done ? "" : `<button class="pt-task-btn clickable-icon" data-act="cancel" title="Cancel — not done, left out of the scores" aria-label="Cancel task">✖</button>`}
     <button class="pt-task-btn clickable-icon" data-act="open" title="Open the note" aria-label="Open">↗</button>
   </div>`;
 }
@@ -2905,7 +2977,7 @@ function goalRows(d, w, { showProject = true, compact = false, reorder = false }
     const proj = g.projectPath ? link(g.projectPath, g.projectName, "pt-proj") : `<span class="pt-proj">${esc(g.projectName)}</span>`;
     return `<div class="pt-goal ${g.score >= 100 ? "is-done" : ""}">
       <div class="pt-goal-head">${showProject ? proj : ""}<span class="pt-goal-text">${esc(g.text)}</span>${badges.join("")}${mv(g, gi)}</div>
-      <div class="pt-goal-bar">${bar(g.score)}<span class="pt-goal-num">${g.score}%</span>${compact ? "" : `<span class="pt-goal-tasks">${g.doneCount}/${g.counted.length} tasks</span>`}</div>
+      <div class="pt-goal-bar">${bar(g.score)}<span class="pt-goal-num">${g.score}%</span>${compact ? "" : `<span class="pt-goal-tasks">${g.doneCount}/${g.counted.length} tasks${g.cancelled && g.cancelled.length ? ` · ${g.cancelled.length} cancelled` : ""}</span>`}</div>
     </div>`;
   }).join("")}</div>`;
 }
@@ -2945,7 +3017,7 @@ function chartTasks(d, ids) {
     const m = d.weekMap.get(id)?.m, x = L + cw * i + cw / 2;
     if (m) {
       s += `<rect class="pt-planned" x="${x - bw / 2}" y="${y(m.planned)}" width="${bw}" height="${y(0) - y(m.planned)}" rx="3"/>`;
-      s += `<rect class="pt-done" x="${x - bw / 2}" y="${y(m.done)}" width="${bw}" height="${y(0) - y(m.done)}" rx="3"><title>${id}: ${m.done} of ${m.planned} tasks done</title></rect>`;
+      s += `<rect class="pt-done" x="${x - bw / 2}" y="${y(m.done)}" width="${bw}" height="${y(0) - y(m.done)}" rx="3"><title>${id}: ${m.done} of ${m.planned} tasks done${m.cancelled ? ` · ${m.cancelled} cancelled` : ""}</title></rect>`;
     }
     if (i % Math.ceil(n / 12) === 0 || i === n - 1) s += `<text class="pt-axis ${id === d.curId ? "pt-axis-cur" : ""}" x="${x}" y="${H - 6}" text-anchor="middle">${shortWeek(id)}</text>`;
   });
@@ -3006,7 +3078,7 @@ function renderWeek(d, path, opts = {}) {
   const state = w.status === "reviewed" ? "reviewed" : past ? "awaiting review" : isCur ? (daysLeft ? `${daysLeft} day${daysLeft > 1 ? "s" : ""} left` : "review tonight") : "upcoming";
   let h = `<div class="pt">`;
   const outside = opts.completions ? opts.completions[w.id] || 0 : null;
-  h += `<div class="pt-kpis">${kpi("Goals achieved", `${w.m.achieved}<span class="pt-of">/${w.m.goals}</span>`)}${kpi("Avg goal progress", w.m.avg === null ? "–" : `${w.m.avg}%`)}${kpi("Tasks done", `${w.m.done}<span class="pt-of">/${w.m.planned}</span>`)}${outside === null ? "" : kpi("Done outside goals", outside, "✅ elsewhere in the vault")}${mixKpi("Unplanned tasks", mixSum(d, [w.id]))}${timeKpi("Time", tSum(d, [w.id]))}${routineKpi(d, w.id)}${kpi("Status", esc(state))}</div>`;
+  h += `<div class="pt-kpis">${kpi("Goals achieved", `${w.m.achieved}<span class="pt-of">/${w.m.goals}</span>`)}${kpi("Avg goal progress", w.m.avg === null ? "–" : `${w.m.avg}%`)}${kpi("Tasks done", `${w.m.done}<span class="pt-of">/${w.m.planned}</span>`, w.m.cancelled ? `✖ ${w.m.cancelled} cancelled, not counted` : "")}${outside === null ? "" : kpi("Done outside goals", outside, "✅ elsewhere in the vault")}${mixKpi("Unplanned tasks", mixSum(d, [w.id]))}${timeKpi("Time", tSum(d, [w.id]))}${routineKpi(d, w.id)}${kpi("Status", esc(state))}</div>`;
   const btn = [];
   if (w.status !== "reviewed" && (isCur || past)) btn.push(["Weekly review", "Weekly review", true]);
   if (!past) btn.push(["Plan / add goals", "Plan week"], ["Plan a project", "Plan project"]);
@@ -3093,8 +3165,8 @@ function routineAnalytics(d, ids, routines = d.routines, title = "Routines") {
 /** All tasks picked for the week, grouped by goal (project), with live progress. Tick / edit right here. */
 function weekTaskList(d, w) {
   const groups = [];
-  for (const g of w.goals) groups.push({ projectPath: g.projectPath, name: g.projectName, goal: g, here: g.tasks, carried: g.carriedOut, score: g.score, counted: g.counted.length, done: g.doneCount });
-  for (const x of w.extra) groups.push({ projectPath: x.projectPath, name: x.projectName, goal: null, here: x.here, carried: x.carriedOut, score: x.counted.length ? Math.round((100 * x.doneCount) / x.counted.length) : 0, counted: x.counted.length, done: x.doneCount });
+  for (const g of w.goals) groups.push({ projectPath: g.projectPath, name: g.projectName, goal: g, here: g.tasks, carried: g.carriedOut, score: g.score, counted: g.counted.length, done: g.doneCount, cancelled: g.cancelled });
+  for (const x of w.extra) groups.push({ projectPath: x.projectPath, name: x.projectName, goal: null, here: x.here, carried: x.carriedOut, score: x.counted.length ? Math.round((100 * x.doneCount) / x.counted.length) : 0, counted: x.counted.length, done: x.doneCount, cancelled: x.cancelled });
   if (!groups.length) return `<div class="pt-empty">No goals or tasks yet — use <b>Plan week</b> or <b>Plan a project</b>.</div>`;
   let h = "";
   for (const gr of groups) {
@@ -3111,8 +3183,9 @@ function weekTaskList(d, w) {
     const done = items.filter((t) => t.isDone);
     h += open.map((t) => taskRow(d, t, { showProject: false, keep: true })).join("");
     if (done.length) h += `<details class="pt-anytime"><summary class="pt-sub">Done <span class="pt-count">${done.length}</span></summary>${done.map((t) => taskRow(d, t, { showProject: false, done: true })).join("")}</details>`;
+    if (gr.cancelled.length) h += `<details class="pt-anytime pt-cancelled"><summary class="pt-sub">Cancelled <span class="pt-count">${gr.cancelled.length}</span> <span class="pt-muted">· not counted</span></summary><ul class="pt-list">${gr.cancelled.map((t) => { const it = toTaskItem(d, t), why = parseFields(String(t.body || t.raw || "")).reason; return `<li><s>${esc(it.desc)}</s>${why ? ` <span class="pt-muted">— ${esc(why)}</span>` : ""}</li>`; }).join("")}</ul></details>`;
     if (gr.carried.length) h += `<div class="pt-muted pt-hint">${gr.carried.length} task(s) moved on to a later week or the backlog</div>`;
-    if (!items.length && !gr.carried.length) h += `<div class="pt-empty">No tasks picked — use <b>Plan a project</b>.</div>`;
+    if (!items.length && !gr.carried.length && !gr.cancelled.length) h += `<div class="pt-empty">No tasks picked — use <b>Plan a project</b>.</div>`;
     h += `</div>`;
   }
   return h;
@@ -3133,7 +3206,7 @@ function renderProject(d, path) {
   }
   let h = `<div class="pt">`;
   if (p.objective) h += `<div class="pt-objective">🎯 ${esc(p.objective)}</div>`;
-  h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone)}${mixKpi("Unplanned · 16 wks", mixSum(d, ids, p.path))}${timeKpi("Time · 16 wks", tSum(d, ids, p.path))}${kpi("Backlog", p.backlog.length)}</div>`;
+  h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone, (() => { const c = mixSum(d, ids, p.path).cancelled; return c ? `✖ ${c} cancelled in 16 wks` : ""; })())}${mixKpi("Unplanned · 16 wks", mixSum(d, ids, p.path))}${timeKpi("Time · 16 wks", tSum(d, ids, p.path))}${kpi("Backlog", p.backlog.length)}</div>`;
   h += `<div class="pt-h">Focus · last 16 weeks</div><div class="pt-strip">${ids.map((id) => {
     const hs = p.history.filter((x) => x.week === id);
     const v = hs.length ? Math.round(mean(hs.map((x) => x.score))) : null;
@@ -3146,14 +3219,14 @@ function renderProject(d, path) {
     const here = b ? b.here.filter((t) => t.status !== "-") : [];
     const w = d.weekMap.get(wid);
     const goal = w ? w.goals.find((g) => g.projectPath === p.path) : null;
-    return { wid, label, open: here.filter(isOpen).length, done: here.filter(isDone).length, moved: b ? b.carried.length : 0, goal, w, unpl: here.filter((t) => isUnplannedIn(t, wid)).length };
+    return { wid, label, open: here.filter(isOpen).length, done: here.filter(isDone).length, moved: b ? b.carried.length : 0, goal, w, unpl: here.filter((t) => isUnplannedIn(t, wid)).length, cancelled: b ? b.here.filter(isCancelled).length : 0 };
   });
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Planned</span><span class="pt-muted">tasks are in the “${PLANNED_SEC}” and “${UNPLANNED_SEC}” sections below</span></div><div class="pt-plan">`;
   for (const x of planned) {
     const total = x.open + x.done + x.moved;
     h += `<div class="pt-plan-row"><span class="pt-plan-week">${x.w && !x.w.virtual ? link(x.w.path, `${x.label} · ${shortWeek(x.wid)}`) : `${x.label} · ${shortWeek(x.wid)}`}</span>
       <span class="pt-plan-goal">${x.goal ? `🎯 ${esc(x.goal.text)}` : `<span class="pt-muted">no goal</span>`}</span>
-      <span class="pt-num">${total ? `${x.done}/${total} done${x.unpl ? ` <span class="pt-muted">· ${x.unpl} unplanned</span>` : ""}${x.moved ? ` <span class="pt-muted">· ${x.moved} moved on</span>` : ""}` : `<span class="pt-muted">no tasks</span>`}</span></div>`;
+      <span class="pt-num">${total ? `${x.done}/${total} done${x.unpl ? ` <span class="pt-muted">· ${x.unpl} unplanned</span>` : ""}${x.moved ? ` <span class="pt-muted">· ${x.moved} moved on</span>` : ""}${x.cancelled ? ` <span class="pt-muted">· ${x.cancelled} cancelled</span>` : ""}` : x.cancelled ? `<span class="pt-muted">${x.cancelled} cancelled</span>` : `<span class="pt-muted">no tasks</span>`}</span></div>`;
   }
   h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", true], ["Add tasks this week (unplanned)", "Add tasks"]])}</div>`;
   h += analysisCard(d, p, (d.aiStore || {})[p.path], d.aiLines);
@@ -3197,7 +3270,7 @@ function renderAnalytics(d, opts = {}) {
     h += `<div class="pt-h">Last week · ${link(lw.path, lw.id)}</div><div class="pt-kpis">`;
     h += kpi("Goals achieved", `${lw.m.achieved}<span class="pt-of">/${lw.m.goals} · ${rate}%</span>`, delta(rate, baseline(d, lw.id, "rate"), " pts"));
     h += kpi("Avg goal score", `${lw.m.avg}%`, delta(lw.m.avg, baseline(d, lw.id, "avg"), " pts"));
-    h += kpi("Tasks done", `${lw.m.done}<span class="pt-of">/${lw.m.planned}</span>`, delta(lw.m.done, baseline(d, lw.id, "done")));
+    h += kpi("Tasks done", `${lw.m.done}<span class="pt-of">/${lw.m.planned}</span>`, delta(lw.m.done, baseline(d, lw.id, "done")) + (lw.m.cancelled ? ` · ✖ ${lw.m.cancelled} cancelled` : ""));
     h += kpi("Carried in", lw.m.carriedIn, lw.m.carriedIn ? "goals rolled over" : "");
     if (opts.completions) h += kpi("Done outside goals", opts.completions[lw.id] || 0, "✅ elsewhere in the vault");
     h += mixKpi("Unplanned tasks", mixSum(d, [lw.id]));
@@ -3223,11 +3296,11 @@ function renderAnalytics(d, opts = {}) {
   }
   h += `</tbody></table></div></div>`;
 
-  h += `<div class="pt-card"><div class="pt-h">Projects</div><table class="pt-table"><thead><tr><th>Project</th><th class="pt-num">Focus wks</th><th class="pt-num">Avg</th><th class="pt-num">Last 4</th><th class="pt-num">Tasks done</th><th class="pt-num" title="Tasks picked for a week: planned / added during the week (Add tasks), last ${ids.length} weeks">Planned / unplanned</th><th class="pt-num">Backlog</th><th>Last focus</th></tr></thead><tbody>`;
+  h += `<div class="pt-card"><div class="pt-h">Projects</div><table class="pt-table"><thead><tr><th>Project</th><th class="pt-num">Focus wks</th><th class="pt-num">Avg</th><th class="pt-num">Last 4</th><th class="pt-num">Tasks done</th><th class="pt-num" title="Tasks picked for a week: planned / added during the week (Add tasks), last ${ids.length} weeks">Planned / unplanned</th><th class="pt-num" title="Tasks cancelled during the week, last ${ids.length} weeks — not counted as planned or done">Cancelled</th><th class="pt-num">Backlog</th><th>Last focus</th></tr></thead><tbody>`;
   for (const p of [...d.projects].filter((p) => !p.routine && (p.status === "active" || p.focusWeeks)).sort((a, b) => (b.focusWeeks - a.focusWeeks) || a.name.localeCompare(b.name))) {
     const trend = p.avg !== null && p.recentAvg !== null && p.focusWeeks > 4 ? (p.recentAvg - p.avg >= 5 ? ` <span class="pt-up">▲</span>` : p.avg - p.recentAvg >= 5 ? ` <span class="pt-down">▼</span>` : "") : "";
     const stale = p.status === "active" && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks);
-    h += `<tr><td>${link(p.path, p.name)}${p.status !== "active" ? ` <span class="pt-muted">${esc(p.status)}</span>` : ""}</td><td class="pt-num">${p.focusWeeks}</td><td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.recentAvg === null ? "–" : p.recentAvg + "%"}${trend}</td><td class="pt-num">${p.tasksDone}</td>${mixCell(mixSum(d, ids, p.path))}<td class="pt-num">${p.backlog.length}</td><td class="${stale ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td></tr>`;
+    h += `<tr><td>${link(p.path, p.name)}${p.status !== "active" ? ` <span class="pt-muted">${esc(p.status)}</span>` : ""}</td><td class="pt-num">${p.focusWeeks}</td><td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.recentAvg === null ? "–" : p.recentAvg + "%"}${trend}</td><td class="pt-num">${p.tasksDone}</td>${mixCell(mixSum(d, ids, p.path))}<td class="pt-num">${mixSum(d, ids, p.path).cancelled || `<span class="pt-muted">–</span>`}</td><td class="pt-num">${p.backlog.length}</td><td class="${stale ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td></tr>`;
   }
   h += `</tbody></table></div>`;
 
@@ -3335,7 +3408,7 @@ async function render(app, mode, path, opts = {}) {
 
 /* ------------------------------------------------------------------ entry */
 
-const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, applyInbox: cmdApplyInbox, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
+const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, applyInbox: cmdApplyInbox, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, cancelTask: cmdCancelTask, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
 
 async function ptrack(tp, cmd, ...args) {
   const app = tp.app || window.app;
@@ -3358,7 +3431,7 @@ module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
   getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
-  parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  cancelTask, cancelLine, isCancelled, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };

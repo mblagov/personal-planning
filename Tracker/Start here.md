@@ -22,8 +22,8 @@ Settings → Community plugins → Browse. Install and enable:
 - Settings → Dataview → turn on **Enable JavaScript queries**.
 
 **Templater**
-- Settings → Templater → **Template hotkeys** → add these ten files, one per row:
-  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Apply inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
+- Settings → Templater → **Template hotkeys** → add these eleven files, one per row:
+  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Apply inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Cancel task.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
 - That's all. You do **not** need to set a template folder or a script folder.
 - Optional: Settings → Hotkeys → search "Tracker/Commands" to give them keyboard shortcuts.
 
@@ -170,6 +170,7 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
 - `[active:: 1h30m]` — hands-on time you actually spent.
 - `[passive:: 3h]` — time the task took without needing you: paint drying, waiting for a reply, a long upload. It's tracked apart so it doesn't spoil your estimates.
 - To log time: the **⏱** button on any task row (Home, week note) opens a small form with *+15m / +30m / +1h / +2h* buttons; or put the cursor on a task and run **Log time** (without a task under the cursor it lets you pick one of this or last week's tasks). Ticking a task that has an estimate asks right away how long it took — Cancel skips it (`log_time_on_done`).
+- To cancel a task that's no longer needed: the **✖** button on a task row (Home, week note), or put the cursor on it and run **Cancel task** (without a task under the cursor it lets you pick one of this or next week's). You can give a reason. The task becomes `- [-] … [reason:: …] ❌ <today>` and moves, with its sub-items, to `## Done`, so it leaves every list. It counts as neither done nor planned: goal progress is *done ÷ (planned − cancelled)*, and the week note, project page and Analytics show how many were cancelled. A repeating task gets its next occurrence. Dropping a task in the weekly review cancels it the same way.
 - Durations: `45m`, `2h`, `1h30m`, `1.5h`, `1:30`; a plain number is minutes.
 - The week note shows *Time* (active vs estimate, passive, and how close your estimates were on done tasks); each goal shows its own; the project page shows the last 16 weeks; Analytics has a **Time · estimates vs spent** table per week and per project. *Actual / est.* = hands-on time ÷ estimate on done tasks that have both: 100% is spot on, 150% means things take you 1.5× longer than you think.
 
@@ -228,7 +229,7 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - `[week:: …]` = the week a task is planned for. You can also add it by hand to any task in the project's folder (sub-notes included).
 - `[from:: …]` = weeks it was planned for before and moved on from. Those weeks count it as *planned, not done*, so your history stays honest.
 - `🎯` lines are goals (not tasks, so they don't show up in Tasks lists). `result` and `miss` are written by the review.
-- A `[-]` task = dropped; it doesn't count. Week notes from older versions with tasks nested under goals still work.
+- A `[-]` task = cancelled (✖ / **Cancel task**, or dropped in the review): it isn't done or planned, so it's left out of progress, and it's counted as cancelled. A `[-]` with `⇢` was moved to a later week or the backlog and still counts as planned-not-done in its old week. Week notes from older versions with tasks nested under goals still work.
 - `[est:: 2h]`, `[active:: 1h30m]`, `[passive:: 3h]` = estimate, hands-on time spent, unattended time. Count for the week the task is planned for.
 - `[unplanned:: 2026-W46]` = added during that week with **Add tasks** (lives in `## Unplanned` until the review moves it on).
 - Routine occurrences: `[missed:: yes]` on a `[-]` line = missed (counts against the routine score); `[-]` without it = skipped.
