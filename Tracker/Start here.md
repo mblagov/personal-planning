@@ -22,8 +22,8 @@ Settings → Community plugins → Browse. Install and enable:
 - Settings → Dataview → turn on **Enable JavaScript queries**.
 
 **Templater**
-- Settings → Templater → **Template hotkeys** → add these eleven files, one per row:
-  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Apply inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Cancel task.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
+- Settings → Templater → **Template hotkeys** → add these twelve files, one per row:
+  `Tracker/Commands/Capture.md`, `Process inbox.md`, `Apply inbox.md`, `Plan week.md`, `Plan project.md`, `Add tasks.md`, `Log time.md`, `Cancel task.md`, `Sync calendar.md`, `Weekly review.md`, `New project.md`, `Register projects.md`
 - That's all. You do **not** need to set a template folder or a script folder.
 - Optional: Settings → Hotkeys → search "Tracker/Commands" to give them keyboard shortcuts.
 
@@ -231,11 +231,39 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - `🎯` lines are goals (not tasks, so they don't show up in Tasks lists). `result` and `miss` are written by the review.
 - A `[-]` task = cancelled (✖ / **Cancel task**, or dropped in the review): it isn't done or planned, so it's left out of progress, and it's counted as cancelled. A `[-]` with `⇢` was moved to a later week or the backlog and still counts as planned-not-done in its old week. Week notes from older versions with tasks nested under goals still work.
 - `[est:: 2h]`, `[active:: 1h30m]`, `[passive:: 3h]` = estimate, hands-on time spent, unattended time. Count for the week the task is planned for.
+- `[time:: 14:30]` / `[time:: 14:30-15:30]` = a set time → Google Calendar; `[cal:: …]` = the linked event (written by the sync).
 - `[unplanned:: 2026-W46]` = added during that week with **Add tasks** (lives in `## Unplanned` until the review moves it on).
 - Routine occurrences: `[missed:: yes]` on a `[-]` line = missed (counts against the routine score); `[-]` without it = skipped.
 - Project properties: `type: project`, `status: active | backlog | done`, `priority: high | medium | low` (unset = medium), `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.
 
-## 11. If something doesn't work
+## 11. Google Calendar
+
+Some tasks happen at a set time (a call at 14:30, the dentist), others can be done any time that day. Give the first kind a time and it goes to your Google Calendar; the rest stay on Home only.
+
+- **A set time**: `[time:: 14:30]` or `[time:: 14:30-15:30]` on a task that has a day (⏳ scheduled, or 📅 due). Without an end time the event lasts as long as the estimate (`[est::]`), or `calendar_default_minutes`. You can write `9`, `9:00`, `2pm`, `14:30 to 15:30`.
+- **Setting it**: the **🕒** button on a task row (Home, week note) — *Any time* removes the time — or the extra question after the day and the deadline when you plan a task (*Any time that day* / *At a set time…*; turn it off with `plan_times`), or type the field yourself.
+- **Sync** (**Sync calendar**, the *Sync* button next to *Today* on Home, or automatically when Home opens and the last sync is older than `calendar_sync_minutes`) works both ways:
+  - a task with a time and a day gets an event in `calendar_id`, linked by `[cal:: …]` on the task line (leave that field alone);
+  - change the task's time, day or wording → the event follows; tick it → the event becomes “✓ …”;
+  - **move the event in Google Calendar** → the task's ⏳ day and `[time::]` follow; if both sides changed since the last sync, the task wins;
+  - **delete the event**, or make it all-day → the task becomes an any-time task for that day (time and link removed);
+  - cancel the task (✖), remove its time or its day, or delete the task → the event is deleted.
+  - A repeating task gets a new event for each occurrence.
+- **Home** shows your other calendar events (from `calendar_id` and the calendars in `calendar_show`) among the tasks: all-day events first, then timed tasks and events in time order, then *Any time today*. The same for each of the next days. Events open in Google Calendar.
+- Events link back to the note (an `obsidian://` link in the event's description).
+
+**Setup (once, about 10 minutes, on the Mac):**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com), create a project (any name, e.g. *Obsidian tracker*).
+2. *APIs & Services → Library* → search **Google Calendar API** → **Enable**.
+3. *APIs & Services → OAuth consent screen* (Google Auth Platform): user type **External**, app name and your email; under *Audience* add your own Google address as a **test user**. Under *Data access* you may add the scope `.../auth/calendar.events`.
+4. *Credentials* (or *Clients*) → **Create OAuth client** → application type **Desktop app** → copy the **Client ID** and **Client secret** into `calendar_client_id` and `calendar_client_secret` in `Tracker/Config`.
+5. Optional: create a separate calendar for your tasks in Google Calendar (e.g. *Tasks*), copy its id from its settings (*Integrate calendar → Calendar ID*) into `calendar_id`. Otherwise they go to your main calendar (`primary`).
+6. In Obsidian on the Mac, run **Sync calendar**. Your browser opens Google's sign-in; allow access (Google warns that the app isn't verified — it's your own app, choose *Continue*). The tab says *connected*, and the first sync runs.
+
+The sign-in is stored in `Tracker/AI/google-calendar-token.json` and syncs with the vault, so the iPhone uses it too — no sign-in needed there. Anyone with that file can edit your calendar events: keep the vault private. To disconnect, delete that file (and remove the app at myaccount.google.com → *Security → Third-party access*). While the consent screen is in *Testing*, Google expires the sign-in after 7 days — then run **Sync calendar** on the Mac again; publishing the app (*Audience → Publish app*, no review needed for your own use) avoids that.
+
+## 12. If something doesn't work
 
 | What you see | Fix |
 |---|---|
@@ -248,5 +276,9 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 | iPhone: "No answers from the shortcut yet" | The shortcut stopped. Run it from the Shortcuts app to see the error — usually folder permission, the shortcut's name not matching `llm_shortcut`, or Apple Intelligence still downloading. |
 | Shortcuts: "Use Model" not available | Your iPhone model or iOS version doesn't support Apple Intelligence, or it's turned off in Settings. |
 | Tasks query shows an error | Update the Tasks plugin. |
+| Calendar: “isn't connected — run Sync calendar on the Mac” | Run **Sync calendar** on the Mac once (section 11). The iPhone can't do the sign-in itself. |
+| Calendar: “sign-in has expired or was revoked” | Run **Sync calendar** on the Mac again. With the consent screen in *Testing* this happens every 7 days — publish the app to stop it. |
+| Calendar: “access_denied” in the browser | Add your Google address as a test user on the OAuth consent screen. |
+| A timed task isn't in the calendar | It needs a day (⏳ or 📅) today or later, and must be open. Press *Sync* on Home. |
 
 All settings are in `Tracker/Config`. The look is in `Tracker/Views/tracker/view.css` and uses your theme's colours.

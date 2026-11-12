@@ -42,6 +42,14 @@ const DEFAULTS = {
   log_time_on_done: true,      // ticking a task with an estimate (in Tracker views) asks for the time spent
   upcoming_days: 7,
   task_tag: "",
+  plan_times: true,            // when planning a dated task, ask whether it has a set time (→ Google Calendar)
+  calendar_client_id: "",      // Google Calendar: your OAuth client (Start here → Google Calendar)
+  calendar_client_secret: "",
+  calendar_id: "primary",      // calendar the timed tasks go to
+  calendar_show: "",           // more calendars to show on Home (ids, comma-separated)
+  calendar_timezone: "",       // empty = this device's time zone
+  calendar_default_minutes: 30, // length of an event when the task has no end time and no estimate
+  calendar_sync_minutes: 15,   // Home syncs when the last sync is older than this; 0 = only with Sync calendar
 };
 const TRACKER_ROOT = "Tracker";
 
@@ -105,7 +113,7 @@ function getConfig(app) {
   for (const k of Object.keys(DEFAULTS)) if (fm[k] !== undefined && fm[k] !== null && fm[k] !== "") cfg[k] = fm[k];
   cfg.project_roots = toArr(cfg.project_roots).map((r) => r.replace(/\/+$/, ""));
   cfg.weeks_folder = String(cfg.weeks_folder).replace(/\/+$/, "");
-  for (const k of ["goals_min", "goals_max", "neglect_weeks", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project"]) cfg[k] = Number(cfg[k]);
+  for (const k of ["goals_min", "goals_max", "neglect_weeks", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project", "calendar_default_minutes", "calendar_sync_minutes"]) cfg[k] = Number(cfg[k]);
   return cfg;
 }
 
@@ -487,7 +495,7 @@ function nextOccurrence(rule, ref) {
 function shiftOccurrence(line, delta, today) {
   let out = line;
   for (const k of ["due", "scheduled", "start"]) { const v = getDate(out, k); if (v) out = setDate(out, k, isoAdd(v, delta)); }
-  out = setDate(setDate(out, "done", null), "cancelled", null);
+  out = setField(setDate(setDate(out, "done", null), "cancelled", null), "cal", null);
   return setDate(out, "created", today);
 }
 function markMissed(line, today) {
@@ -816,7 +824,7 @@ function setTimes(line, vals) {
 function cleanRecurrence(text) {
   const ls = String(text).split("\n");
   if (ls.length < 2) return text;
-  return ls.map((l) => (/^\s*[-*+]\s+\[[ /]\]/.test(l) ? setTimes(l, { active: null, passive: null }) : l)).join("\n");
+  return ls.map((l) => (/^\s*[-*+]\s+\[[ /]\]/.test(l) ? setField(setTimes(l, { active: null, passive: null }), "cal", null) : l)).join("\n");
 }
 const T0 = () => ({ tasks: 0, est: 0, estN: 0, active: 0, passive: 0, logged: 0, doneEst: 0, doneActive: 0, doneN: 0 });
 function tAdd(a, t) {
@@ -1001,7 +1009,7 @@ function makeEnv(app, tp) {
     notice: (msg, ms = 6000) => { try { new obs.Notice(msg, ms); } catch (e) { console.log("[tracker]", msg); } },
     request: async (opts) => {
       if (obs && obs.requestUrl) { const r = await obs.requestUrl({ ...opts, throw: false }); return { status: r.status, text: r.text }; }
-      const r = await fetch(opts.url, { method: opts.method, headers: { "Content-Type": opts.contentType }, body: opts.body });
+      const r = await fetch(opts.url, { method: opts.method, headers: Object.assign({ "Content-Type": opts.contentType }, opts.headers || {}), body: opts.body });
       return { status: r.status, text: await r.text() };
     },
     open: async (path) => { const f = app.vault.getAbstractFileByPath(path); if (f) await app.workspace.getLeaf(false).openFile(f); },
@@ -2129,6 +2137,7 @@ async function askSchedule(env, cfg, target, line) {
   if (cfg.plan_schedule_tasks) line = await askScheduled(env, target, line);
   if (cfg.plan_due_dates) line = await askDue(env, target, line);
   if (cfg.plan_estimates) line = await askEstimate(env, line);
+  if (cfg.plan_times) line = await askClock(env, line);
   return line;
 }
 const EST_CHOICES = [15, 30, 60, 90, 120, 180, 240, 360, 480];
@@ -2790,6 +2799,7 @@ function classifyTasks(d, tasks) {
       path: t.path, line: t.line, text,
       desc: stripFields(splitMeta(text).head).replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2").replace(/^🎯\s*/u, "").trim(),
       due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text), time: timeOf(text), recurring: !!ruleOf(text),
+      clock: clockOf(text, d.cfg), cal: !!parseFields(text).cal,
     };
     const wt = weekTask.get(`${t.path}:${t.line}`);
     const firstDate = [getDate(text, "scheduled"), getDate(text, "due")].filter(Boolean).sort()[0];
@@ -2837,7 +2847,7 @@ function classifyTasks(d, tasks) {
     String(a.scheduled || "9").localeCompare(String(b.scheduled || "9")) ||
     a.desc.localeCompare(b.desc);
   // Routines rank below project work, unless they have a deadline (📅) or a high priority (⏫ / 🔺).
-  const lowRoutine = (t) => t.routine && !t.due && t.prio !== "high" && t.prio !== "highest";
+  const lowRoutine = (t) => t.routine && !t.clock && !t.due && t.prio !== "high" && t.prio !== "highest";
   const byDayThenDeadline = (a, b) => String(a.when).localeCompare(String(b.when)) || (lowRoutine(a) - lowRoutine(b)) || byDeadline(a, b);
   out.today.sort(byDeadline); out.later.sort(byDayThenDeadline); out.anytime.sort(byDeadline); out.outside.sort(byDeadline);
   out.routines = out.today.filter(lowRoutine);            // shown as a compact list under Today
@@ -2845,12 +2855,18 @@ function classifyTasks(d, tasks) {
   out.later = out.later.filter((t) => !(lowRoutine(t) && t.freq === "daily")); // daily ones would repeat every day
   return out;
 }
+/** { start, end } minutes of a task's [time::] (end from the estimate or the default length), or null. */
+function clockOf(text, cfg) {
+  const r = parseClockRange(parseFields(text).time);
+  if (!r) return null;
+  return { start: r.start, end: r.end !== null ? r.end : r.start + (timeOf(text).est || Number(cfg && cfg.calendar_default_minutes) || 30) };
+}
 function toTaskItem(d, t) {
   const text = String(t.body !== undefined ? t.body : t.text || "");
   const today = d.today.format("YYYY-MM-DD");
   const it = { path: t.path, line: t.line, text, status: t.status,
     desc: stripFields(splitMeta(text).head).replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2").trim(),
-    due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text), time: timeOf(text), recurring: !!ruleOf(text) };
+    due: getDate(text, "due"), scheduled: getDate(text, "scheduled"), start: getDate(text, "start"), prio: prioOf(text), time: timeOf(text), recurring: !!ruleOf(text), clock: clockOf(text, d.cfg), cal: !!parseFields(text).cal };
   it.overdue = isOpen(t) && (!!(it.due && it.due < today) || !!(it.scheduled && it.scheduled < today));
   return it;
 }
@@ -2859,6 +2875,7 @@ function taskRow(d, t, { showProject = true, done = false, keep = false } = {}) 
   const chip = (emoji, iso, cls = "") => `<span class="pt-chip ${cls}">${emoji} ${iso === d.today.format("YYYY-MM-DD") ? "today" : m(iso, "YYYY-MM-DD").format("ddd D MMM")}</span>`;
   const chips = [];
   const p = t.prio;
+  if (t.clock) chips.push(`<span class="pt-chip pt-chip-clock" title="${t.cal ? "in Google Calendar" : "set time — goes to the calendar on the next sync"}">🕒 ${fmtClock(t.clock.start)}–${fmtClock(t.clock.end)}${t.cal ? " 📆" : ""}</span>`);
   if (p === "highest" || p === "high") chips.push(`<span class="pt-chip pt-chip-prio">${p === "highest" ? "🔺" : "⏫"}</span>`);
   if (t.scheduled) chips.push(chip("⏳", t.scheduled, t.scheduled < d.today.format("YYYY-MM-DD") ? "pt-chip-late" : ""));
   if (t.due) chips.push(chip("📅", t.due, t.due < d.today.format("YYYY-MM-DD") ? "pt-chip-late" : t.due === d.today.format("YYYY-MM-DD") ? "pt-chip-today" : ""));
@@ -2872,11 +2889,38 @@ function taskRow(d, t, { showProject = true, done = false, keep = false } = {}) 
   return `<div class="pt-task${t.overdue ? " is-overdue" : ""}${done ? " is-done" : ""}" data-path="${esc(t.path)}" data-line="${t.line}" data-text="${esc(t.text)}"${done || keep ? ' data-keep="1"' : ""}${tm.est ? ` data-est="${tm.est}"` : ""}${tm.active ? ` data-active="${tm.active}"` : ""}${t.recurring ? ' data-recurring="1"' : ""}>
     <input type="checkbox" class="task-list-item-checkbox pt-task-check" aria-label="Done"${done ? " checked" : ""}>
     <div class="pt-task-body"><span class="pt-task-text">${esc(t.desc || t.text)}</span><span class="pt-task-meta">${proj}${chips.join("")}</span></div>
+    ${done ? "" : `<button class="pt-task-btn clickable-icon" data-act="clock" data-clock="${t.clock ? esc(parseFields(t.text).time || "") : ""}" title="Set time of day (goes to Google Calendar) or any time" aria-label="Set time">🕒</button>`}
     <button class="pt-task-btn clickable-icon" data-act="time" title="Estimate and time spent" aria-label="Time">⏱</button>
     <button class="pt-task-btn clickable-icon" data-act="edit" title="Edit dates and priority" aria-label="Edit">✎</button>
     ${done ? "" : `<button class="pt-task-btn clickable-icon" data-act="cancel" title="Cancel — not done, left out of the scores" aria-label="Cancel task">✖</button>`}
     <button class="pt-task-btn clickable-icon" data-act="open" title="Open the note" aria-label="Open">↗</button>
   </div>`;
+}
+/** Calendar events (not the tracker's own) on a day, from the last sync. */
+function calEvents(d, iso) {
+  const items = (d.cal && d.cal.cache && d.cal.cache.items) || [];
+  return items.filter((e) => (e.allDay ? e.date <= iso && (e.endDate || e.date) >= iso : e.date === iso));
+}
+function agoText(iso) {
+  const m = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
+}
+function calNote(d) {
+  if (!d.calOn) return "";
+  const at = d.cal && d.cal.lastSync;
+  return ` <span class="pt-muted pt-cal-note">· 📆 ${at ? `synced ${agoText(at)}` : "not synced yet"} <button class="pt-mini" data-cal="sync" title="Sync timed tasks with Google Calendar">Sync</button></span>`;
+}
+function eventRow(e) {
+  const when = e.allDay ? "all day" : `${fmtClock(e.start)}–${fmtClock(e.end)}`;
+  return `<div class="pt-event${e.allDay ? " is-allday" : ""}"><span class="pt-event-time">${when}</span><span class="pt-event-title">${e.link ? `<a href="${esc(e.link)}" class="external-link">${esc(e.title)}</a>` : esc(e.title)}</span><span class="pt-muted">📆</span></div>`;
+}
+/** A day: all-day events, then timed tasks and events in time order, then tasks for any time of the day. */
+function dayList(d, tasks, evs, today) {
+  const timed = [...tasks.filter((t) => t.clock).map((t) => ({ at: t.clock.start, html: taskRow(d, t) })), ...evs.filter((e) => !e.allDay).map((e) => ({ at: e.start, html: eventRow(e) }))].sort((a, b) => a.at - b.at);
+  const rest = tasks.filter((t) => !t.clock);
+  let h = evs.filter((e) => e.allDay).map(eventRow).join("") + timed.map((x) => x.html).join("");
+  if (rest.length && timed.length && today) h += `<div class="pt-day pt-anytime-head">Any time today</div>`;
+  return h + rest.map((t) => taskRow(d, t)).join("");
 }
 function renderTaskWidgets(d, tasks) {
   const c = classifyTasks(d, tasks);
@@ -2887,20 +2931,23 @@ function renderTaskWidgets(d, tasks) {
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Focus tasks</span><span class="pt-muted">${esc(focusNames.join(" · "))}${nextNames.length ? ` <span class="pt-next">+ next week: ${esc(nextNames.join(" · "))}</span>` : ""}</span></div>`;
   if (!c.hasPlan && !c.today.length && !c.later.length && !c.routines.length) h += `<div class="pt-empty">No plan for this week — only tasks outside focus are shown below.</div>`;
   else {
-    h += `<div class="pt-sub">Today${c.today.length ? ` <span class="pt-count">${c.today.length}</span>` : ""}</div>`;
-    h += c.today.length ? c.today.map((t) => taskRow(d, t)).join("") : `<div class="pt-empty">Nothing scheduled or due today.</div>`;
+    const evToday = calEvents(d, c.todayIso);
+    h += `<div class="pt-sub">Today${c.today.length ? ` <span class="pt-count">${c.today.length}</span>` : ""}${calNote(d)}</div>`;
+    h += c.today.length || evToday.length ? dayList(d, c.today, evToday, true) : `<div class="pt-empty">Nothing scheduled or due today.</div>`;
     if (d.routines.some((r) => r.project.status === "active")) {
       const rw = d.routineWeeks.get(d.curId), rp = rPct(rw), avg = routineAvg(d, d.curId, 4);
       const multi = new Set(c.routines.map((t) => t.project.path)).size > 1;
       h += `<div class="pt-sub">Routines today${c.routines.length ? ` <span class="pt-count">${c.routines.length}</span>` : ""} <span class="pt-muted">· this week ${rw && rw.done + rw.missed ? `${rw.done}/${rw.done + rw.missed} · ${rp}%` : "–"}${avg !== null ? ` · 4-wk avg ${avg}%` : ""}</span></div>`;
       h += c.routines.length ? `<div class="pt-routines">${c.routines.map((t) => taskRow(d, t, { showProject: multi })).join("")}</div>` : `<div class="pt-empty">No routines left for today.</div>`;
     }
-    if (c.later.length) {
-      let day = null;
+    const laterDays = [];
+    for (let i = 1; i <= c.days; i++) laterDays.push(isoAdd(c.todayIso, i));
+    if (c.later.length || laterDays.some((x) => calEvents(d, x).length)) {
       h += `<div class="pt-sub">Next ${c.days} days${c.planned.length ? ` <span class="pt-muted">· this week + ${c.planned.map(shortWeek).join(", ")} focus</span>` : ""}</div>`;
-      for (const t of c.later) {
-        if (t.when !== day) { day = t.when; h += `<div class="pt-day">${m(day, "YYYY-MM-DD").format("dddd D MMM")}</div>`; }
-        h += taskRow(d, t);
+      for (const day of laterDays) {
+        const ts = c.later.filter((t) => t.when === day), evs = calEvents(d, day);
+        if (!ts.length && !evs.length) continue;
+        h += `<div class="pt-day">${m(day, "YYYY-MM-DD").format("dddd D MMM")}</div>` + dayList(d, ts, evs, false);
       }
     }
     if (c.anytime.length) h += `<details class="pt-anytime"><summary class="pt-sub">Any day this week <span class="pt-count">${c.anytime.length}</span></summary>${c.anytime.map((t) => taskRow(d, t)).join("")}</details>`;
@@ -2927,6 +2974,362 @@ function toggleDoneLine(line, today) {
   if (!m) return line;
   if (m[2] === "x" || m[2] === "X") return setDate(setStatus(line, " "), "done", null);
   return setDate(setStatus(line, "x"), "done", today);
+}
+
+/* ------------------------------------------------------------------ Google Calendar */
+// A task with a precise time has [time:: 14:30] or [time:: 14:30-15:30] plus a day (⏳ scheduled, else 📅 due).
+// Sync calendar pushes those to Google Calendar as events ([cal:: <event id>] links them), pulls back a day/time you
+// changed in the calendar, and keeps a copy of your other calendar events for Home. Tasks without a time stay out.
+
+const GCAL_TOKEN = `${AI_DIR}/google-calendar-token.json`;
+const GCAL_STATE = `${AI_DIR}/calendar.json`;
+const GCAL_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+const GCAL_API = "https://www.googleapis.com/calendar/v3";
+const GCAL_TOKEN_URL = "https://oauth2.googleapis.com/token";
+
+/** "14:30", "9", "9.15", "0930", "2pm", "2:30 pm" → minutes after midnight, or null. */
+function parseClock(s) {
+  const t = String(s || "").trim().toLowerCase().replace(/\s+/g, "");
+  let m = t.match(/^(\d{1,2})(?:[:.h](\d{2}))?(am|pm)?$/) || t.match(/^(\d{2})(\d{2})()$/);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = Number(m[2] || 0), ap = m[3];
+  if (ap) { if (h < 1 || h > 12) return null; h = (h % 12) + (ap === "pm" ? 12 : 0); }
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+const fmtClock = (min) => { const v = ((Math.round(min) % 1440) + 1440) % 1440; return `${String(Math.floor(v / 60)).padStart(2, "0")}:${String(v % 60).padStart(2, "0")}`; };
+/** "14:30" or "14:30-15:30" (also –, "to") → { start, end } in minutes (end null when not given), or null. */
+function parseClockRange(v) {
+  const parts = String(v || "").trim().split(/\s*(?:-|–|—|\bto\b)\s*/i).filter(Boolean);
+  if (!parts.length || parts.length > 2) return null;
+  const start = parseClock(parts[0]);
+  if (start === null) return null;
+  const end = parts[1] !== undefined ? parseClock(parts[1]) : null;
+  if (parts[1] !== undefined && end === null) return null;
+  return { start, end };
+}
+/** Set or clear the time of a task. value: "14:30", "14:30-15:30", "" / null = any time. Returns the line, or null if it doesn't parse. */
+function setClock(line, value) {
+  if (value === null || value === undefined || !String(value).trim()) return setField(line, "time", null);
+  const r = parseClockRange(value);
+  if (!r) return null;
+  return setField(line, "time", r.end === null ? fmtClock(r.start) : `${fmtClock(r.start)}-${fmtClock(r.end)}`);
+}
+/** The calendar slot of a task line: { date, start, end, endDate } (minutes; end may pass midnight), or null for an any-time task. */
+function slotOf(line, cfg) {
+  const f = parseFields(line);
+  const r = parseClockRange(f.time);
+  const date = getDate(line, "scheduled") || getDate(line, "due");
+  if (!r || !date) return null;
+  const est = timeOf(f).est;
+  let end = r.end !== null ? r.end : r.start + (est || Number(cfg.calendar_default_minutes) || 30);
+  if (end <= r.start) end += 1440;
+  return { date, start: r.start, end, endDate: isoAdd(date, Math.floor(end / 1440)) };
+}
+const clockText = (s) => (s ? `${fmtClock(s.start)}–${fmtClock(s.end)}` : "");
+function calTz(cfg) {
+  if (cfg.calendar_timezone) return String(cfg.calendar_timezone);
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (e) { return "UTC"; }
+}
+/** An RFC 3339 time from Google → { date, min } in the calendar's time zone. */
+function localParts(dt, tz) {
+  const d = new Date(dt);
+  try {
+    const p = {};
+    for (const x of new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(d)) p[x.type] = x.value;
+    return { date: `${p.year}-${p.month}-${p.day}`, min: (Number(p.hour) % 24) * 60 + Number(p.minute) };
+  } catch (e) {
+    return { date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`, min: d.getHours() * 60 + d.getMinutes() };
+  }
+}
+const GCAL_ID_CHARS = "0123456789abcdefghijklmnopqrstuv"; // Google event ids: base32hex
+function newEventId() { let s = "pt"; for (let i = 0; i < 18; i++) s += GCAL_ID_CHARS[Math.floor(Math.random() * 32)]; return s; }
+
+async function readJson(app, path) {
+  const f = app.vault.getAbstractFileByPath(path);
+  if (!f) return null;
+  try { return JSON.parse(await app.vault.read(f)); } catch (e) { return null; }
+}
+async function gcalLoadState(app) { const s = await readJson(app, GCAL_STATE); return Object.assign({ events: {}, cache: null, lastSync: null }, s || {}); }
+async function gcalConnected(app) { const t = await readJson(app, GCAL_TOKEN); return !!(t && t.refresh_token); }
+
+const formBody = (o) => Object.entries(o).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+function b64url(bytes) {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function randomString(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
+
+/** One-time sign-in (desktop): opens Google in the browser and catches the answer on a local port. Saves the refresh token. */
+async function gcalConnect(env, cfg) {
+  if (!cfg.calendar_client_id) throw new Error("set calendar_client_id and calendar_client_secret in Tracker/Config first — see Start here → Google Calendar");
+  if (env.isMobile) throw new Error("connect Google Calendar once on the Mac — the iPhone then uses the same sign-in (Tracker/AI, synced with the vault)");
+  const req = typeof require === "function" ? require : typeof window !== "undefined" && window.require;
+  if (!req) throw new Error("can't open a local port for the Google sign-in here — connect on the Mac");
+  const http = req("http");
+  const verifier = randomString(48);
+  const challenge = b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
+  const state = randomString(12);
+  let server;
+  const got = new Promise((resolve, reject) => {
+    server = http.createServer((rq, rs) => {
+      const u = new URL(rq.url, "http://127.0.0.1");
+      if (!u.searchParams.get("code") && !u.searchParams.get("error")) { rs.writeHead(404); rs.end(); return; }
+      const ok = u.searchParams.get("state") === state && u.searchParams.get("code");
+      rs.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      rs.end(`<html><body style="font-family:-apple-system,sans-serif;padding:3em"><h2>${ok ? "✔ Google Calendar is connected" : "✖ Sign-in failed"}</h2><p>You can close this tab and go back to Obsidian.</p></body></html>`);
+      if (ok) resolve(u.searchParams.get("code")); else reject(new Error(`Google sign-in failed: ${u.searchParams.get("error") || "state mismatch"}`));
+    });
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1");
+    setTimeout(() => reject(new Error("Google sign-in timed out — run Sync calendar again")), 5 * 60 * 1000);
+  });
+  await new Promise((r) => (server.listening ? r() : server.once("listening", r)));
+  const redirect = `http://127.0.0.1:${server.address().port}`;
+  const url = `https://accounts.google.com/o/oauth2/v2/auth?${formBody({ client_id: cfg.calendar_client_id, redirect_uri: redirect, response_type: "code", scope: GCAL_SCOPE, code_challenge: challenge, code_challenge_method: "S256", access_type: "offline", prompt: "consent", state })}`;
+  env.notice("📆 Sign in to Google in your browser to connect the calendar…", 10000);
+  env.openUrl(url);
+  let code;
+  try { code = await got; } finally { try { server.close(); } catch (e) { /* closed */ } }
+  const r = await env.request({ url: GCAL_TOKEN_URL, method: "POST", contentType: "application/x-www-form-urlencoded",
+    body: formBody({ code, client_id: cfg.calendar_client_id, client_secret: cfg.calendar_client_secret || "", redirect_uri: redirect, grant_type: "authorization_code", code_verifier: verifier }) });
+  const j = JSON.parse(r.text || "{}");
+  if (r.status !== 200 || !j.refresh_token) throw new Error(`Google didn't return a sign-in token (${r.status}): ${j.error_description || j.error || r.text}`);
+  await writeFile(env.app, GCAL_TOKEN, JSON.stringify({ refresh_token: j.refresh_token, access_token: j.access_token, expires_at: Date.now() + (j.expires_in || 3600) * 1000 }, null, 2));
+  env.notice("📆 Google Calendar connected.");
+}
+async function gcalAccess(env, cfg, force = false) {
+  const tok = await readJson(env.app, GCAL_TOKEN);
+  if (!tok || !tok.refresh_token) return null;
+  if (!force && tok.access_token && tok.expires_at > Date.now() + 60000) return tok.access_token;
+  const r = await env.request({ url: GCAL_TOKEN_URL, method: "POST", contentType: "application/x-www-form-urlencoded",
+    body: formBody({ client_id: cfg.calendar_client_id, client_secret: cfg.calendar_client_secret || "", refresh_token: tok.refresh_token, grant_type: "refresh_token" }) });
+  const j = JSON.parse(r.text || "{}");
+  if (r.status !== 200 || !j.access_token) {
+    if (j.error === "invalid_grant") throw new Error("the Google sign-in has expired or was revoked — run Sync calendar on the Mac to connect again");
+    throw new Error(`couldn't refresh the Google sign-in (${r.status}): ${j.error_description || j.error || r.text}`);
+  }
+  Object.assign(tok, { access_token: j.access_token, expires_at: Date.now() + (j.expires_in || 3600) * 1000 });
+  await writeFile(env.app, GCAL_TOKEN, JSON.stringify(tok, null, 2));
+  return tok.access_token;
+}
+/** Call the Calendar API. Returns parsed JSON, null for 404 / 410 (gone), {} for an empty answer. */
+async function gapi(env, cfg, method, path, { query, body } = {}) {
+  let url = `${GCAL_API}${path}`;
+  if (query) url += `?${formBody(Object.fromEntries(Object.entries(query).filter(([, v]) => v !== undefined && v !== null)))}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const token = await gcalAccess(env, cfg, attempt > 0);
+    if (!token) throw new Error("Google Calendar isn't connected — run Sync calendar on the Mac");
+    const r = await env.request({ url, method, contentType: "application/json", headers: { Authorization: `Bearer ${token}` }, body: body ? JSON.stringify(body) : undefined });
+    if (r.status === 401 && attempt === 0) continue;
+    if (r.status === 404 || r.status === 410) return null;
+    if (r.status < 200 || r.status >= 300) {
+      let msg = r.text;
+      try { msg = JSON.parse(r.text).error.message; } catch (e) { /* plain text */ }
+      throw new Error(`Google Calendar: ${msg} (${r.status})`);
+    }
+    return r.text ? JSON.parse(r.text) : {};
+  }
+  return null;
+}
+const calPath = (cfg) => `/calendars/${encodeURIComponent(cfg.calendar_id || "primary")}/events`;
+async function gcalList(env, cfg, calId, query) {
+  const out = [];
+  let page;
+  for (let i = 0; i < 20; i++) {
+    const j = await gapi(env, cfg, "GET", `/calendars/${encodeURIComponent(calId)}/events`, { query: Object.assign({ singleEvents: "true", maxResults: 2500, pageToken: page }, query) });
+    if (!j) break;
+    out.push(...(j.items || []));
+    if (!(page = j.nextPageToken)) break;
+  }
+  return out;
+}
+
+/** What the calendar should show for a task. */
+function taskSig(t) { return JSON.stringify([t.slot.date, t.slot.start, t.slot.end, t.desc, isDone(t) ? "done" : "open"]); }
+function eventBody(app, cfg, t, projName) {
+  const tz = calTz(cfg), s = t.slot;
+  const vault = app.vault.getName ? app.vault.getName() : "";
+  return {
+    summary: `${isDone(t) ? "✓ " : ""}${t.desc}`,
+    description: `${projName ? `${projName} · ` : ""}from Obsidian\nobsidian://open?vault=${encodeURIComponent(vault)}&file=${encodeURIComponent(t.path.replace(/\.md$/, ""))}`,
+    start: { dateTime: `${s.date}T${fmtClock(s.start)}:00`, timeZone: tz },
+    end: { dateTime: `${s.endDate}T${fmtClock(s.end)}:00`, timeZone: tz },
+    extendedProperties: { private: { ptrack: "1" } },
+  };
+}
+/** Write a time (and day) that was changed in the calendar back into a task line. */
+function pullSlot(line, ev, cfg) {
+  const tz = calTz(cfg);
+  const a = localParts(ev.start.dateTime, tz), b = localParts(ev.end.dateTime, tz);
+  let dur = isoDiff(a.date, b.date) * 1440 + b.min - a.min;
+  if (dur <= 0) dur = Number(cfg.calendar_default_minutes) || 30;
+  const derived = timeOf(line).est || Number(cfg.calendar_default_minutes) || 30;
+  let out = setField(line, "time", dur === derived ? fmtClock(a.min) : `${fmtClock(a.min)}-${fmtClock(a.min + dur)}`);
+  const cur = getDate(line, "scheduled") || getDate(line, "due");
+  if (a.date !== cur) out = setDate(out, "scheduled", a.date);
+  return out;
+}
+
+/**
+ * Two-way sync. Tasks with a time and a day get an event; a day / time changed in the calendar comes back to the task
+ * (the task wins when both changed); an event deleted in the calendar (or made all-day) turns the task into an any-time
+ * task; done tasks show as “✓ …”; cancelled tasks and tasks whose time was removed lose their event.
+ * Returns a summary { created, updated, pulled, removed, unlinked, conflicts, events }.
+ */
+async function syncCalendar(env, { quiet = false } = {}) {
+  const { app } = env, cfg = getConfig(app);
+  if (!(await gcalConnected(app))) {
+    if (quiet) return null;
+    await gcalConnect(env, cfg);
+  }
+  const today = env.moment().format("YYYY-MM-DD");
+  const from = isoAdd(today, -60), to = isoAdd(today, 400);
+  const state = await gcalLoadState(app);
+  const projects = listProjects(app, cfg), ctx = { cfg, projects };
+  // 1. every task that has a time or an event
+  const tasks = [];
+  for (const f of app.vault.getMarkdownFiles()) {
+    if (f.path.startsWith(TRACKER_ROOT + "/")) continue;
+    const p = projectOfPath(ctx, f.path);
+    if (!p) continue;
+    const content = await app.vault.cachedRead(f);
+    if (!content.includes("[time::") && !content.includes("[cal::")) continue;
+    for (const it of parseItems(content.split("\n"))) {
+      if (!it.task || (!it.fields.time && !it.fields.cal)) continue;
+      const t = { path: f.path, line: it.line, raw: it.raw, status: it.status, fields: it.fields, desc: taskDesc(it.raw), cal: it.fields.cal || null, project: p.name };
+      t.slot = slotOf(it.raw, cfg);
+      tasks.push(t);
+    }
+  }
+  // a repeating task's next occurrence may have copied the event id: only one line keeps it
+  const byId = new Map();
+  for (const t of tasks) if (t.cal) { if (!byId.has(t.cal)) byId.set(t.cal, []); byId.get(t.cal).push(t); }
+  for (const [id, ts] of byId) if (ts.length > 1) {
+    const st = state.events[id];
+    const keep = ts.find((t) => t.slot && st && taskSig(t) === st.sig) || ts.find((t) => !isOpen(t)) || ts[0];
+    for (const t of ts) if (t !== keep) { t.cal = null; t.dropId = true; }
+  }
+  // 2. our events in the calendar
+  const evs = await gcalList(env, cfg, cfg.calendar_id || "primary", { privateExtendedProperty: "ptrack=1", showDeleted: "true", timeMin: `${from}T00:00:00Z`, timeMax: `${to}T00:00:00Z` });
+  const evById = new Map(evs.map((e) => [e.id, e]));
+  const res = { created: 0, updated: 0, pulled: 0, removed: 0, unlinked: 0, conflicts: 0, events: 0 };
+  const edits = [];
+  const edit = (t, line) => { if (line !== t.raw) edits.push({ path: t.path, raw: t.raw, line: t.line, next: line }); };
+  const inWindow = (date) => date >= from && date < to;
+  const del = async (id) => { await gapi(env, cfg, "DELETE", `${calPath(cfg)}/${encodeURIComponent(id)}`); delete state.events[id]; res.removed++; };
+  const linked = new Set();
+  for (const t of tasks) {
+    let line = t.raw;
+    if (t.dropId) line = setField(line, "cal", null);
+    const id = t.cal;
+    if (!id) {
+      if (isOpen(t) && t.slot && t.slot.date >= today && t.slot.date < to) {
+        const nid = newEventId();
+        const ev = await gapi(env, cfg, "POST", calPath(cfg), { body: Object.assign({ id: nid }, eventBody(app, cfg, t, t.project)) });
+        line = setField(line, "cal", nid);
+        state.events[nid] = { sig: taskSig(t), updated: ev && ev.updated, path: t.path };
+        linked.add(nid); res.created++;
+      }
+      edit(t, line);
+      continue;
+    }
+    linked.add(id);
+    const ev = evById.get(id), st = state.events[id];
+    if (!t.slot || t.status === "-") {   // no time / no day any more, or cancelled: the event goes
+      if (ev && ev.status !== "cancelled") await del(id); else delete state.events[id];
+      edit(t, setField(line, "cal", null)); res.unlinked++;
+      continue;
+    }
+    if (!inWindow(t.slot.date)) continue; // far past / far future: leave it alone
+    const gone = ev ? ev.status === "cancelled" : !!st;
+    if (gone || (ev && ev.start && ev.start.date)) { // deleted in the calendar, or made all-day → any time that day
+      if (ev && ev.status !== "cancelled") await del(id); else delete state.events[id];
+      edit(t, setField(setField(line, "cal", null), "time", null)); res.unlinked++;
+      continue;
+    }
+    const sig = taskSig(t);
+    const taskChanged = !st || st.sig !== sig;
+    const evChanged = !!(ev && st && ev.updated !== st.updated);
+    if (!ev) { // never seen by this device and not in the calendar: make it again under a new id
+      const nid = newEventId();
+      const made = await gapi(env, cfg, "POST", calPath(cfg), { body: Object.assign({ id: nid }, eventBody(app, cfg, t, t.project)) });
+      edit(t, setField(line, "cal", nid));
+      state.events[nid] = { sig, updated: made && made.updated, path: t.path };
+      linked.add(nid); res.created++;
+      continue;
+    }
+    if (evChanged && !taskChanged) {
+      const next = pullSlot(line, ev, cfg);
+      const nt = Object.assign({}, t, { slot: slotOf(next, cfg) });
+      state.events[id] = { sig: nt.slot ? taskSig(nt) : sig, updated: ev.updated, path: t.path };
+      if (next !== line) res.pulled++;
+      edit(t, next);
+      continue;
+    }
+    if (evChanged && taskChanged) res.conflicts++;
+    if (taskChanged) {
+      const up = await gapi(env, cfg, "PATCH", `${calPath(cfg)}/${encodeURIComponent(id)}`, { body: eventBody(app, cfg, t, t.project) });
+      state.events[id] = { sig, updated: up && up.updated, path: t.path };
+      res.updated++;
+    }
+    edit(t, line);
+  }
+  // 3. events whose task was deleted from a note that still exists (a few minutes' grace for notes still syncing)
+  for (const ev of evs) {
+    if (ev.status === "cancelled" || linked.has(ev.id)) continue;
+    const st = state.events[ev.id];
+    if (!st || !app.vault.getAbstractFileByPath(st.path)) continue;
+    if (ev.updated && Date.now() - new Date(ev.updated).getTime() < 10 * 60 * 1000) continue;
+    await del(ev.id);
+  }
+  // 4. write the task changes
+  const byPath = new Map();
+  for (const e of edits) { if (!byPath.has(e.path)) byPath.set(e.path, []); byPath.get(e.path).push(e); }
+  for (const [path, es] of byPath) await editLines(app, path, (ls) => { for (const e of es) { const k = locateRaw(ls, e.raw, e.line); if (k >= 0) ls[k] = e.next; } });
+  // 5. the coming days' calendar events for Home (yours, not the tracker's)
+  const days = Math.max(1, Number(cfg.upcoming_days) || 7);
+  const show = [cfg.calendar_id || "primary", ...toArr(cfg.calendar_show)].filter((x, i, a) => a.indexOf(x) === i);
+  const items = [];
+  const tz = calTz(cfg);
+  for (const calId of show) {
+    for (const e of await gcalList(env, cfg, calId, { timeMin: `${isoAdd(today, -1)}T00:00:00Z`, timeMax: `${isoAdd(today, days + 2)}T00:00:00Z`, orderBy: "startTime" })) {
+      if (e.status === "cancelled" || (e.extendedProperties && e.extendedProperties.private && e.extendedProperties.private.ptrack)) continue;
+      if (e.start.date) { items.push({ title: e.summary || "(busy)", date: e.start.date, endDate: isoAdd(e.end.date, -1), allDay: true, link: e.htmlLink || "" }); continue; }
+      const a = localParts(e.start.dateTime, tz), b = localParts(e.end.dateTime, tz);
+      items.push({ title: e.summary || "(busy)", date: a.date, start: a.min, end: b.date === a.date ? b.min : 1440, allDay: false, link: e.htmlLink || "" });
+    }
+  }
+  res.events = items.length;
+  state.cache = { at: new Date().toISOString(), from: today, items };
+  state.lastSync = new Date().toISOString();
+  await writeFile(app, GCAL_STATE, JSON.stringify(state, null, 2));
+  return res;
+}
+function syncSummary(r) {
+  if (!r) return "Google Calendar isn't connected.";
+  const bits = [r.created && `${r.created} added`, r.updated && `${r.updated} updated`, r.pulled && `${r.pulled} moved from the calendar`, r.unlinked && `${r.unlinked} back to any time / removed`, r.removed && !r.unlinked && `${r.removed} removed`, r.conflicts && `${r.conflicts} changed on both sides — kept the task's time`].filter(Boolean);
+  return `📆 Calendar synced${bits.length ? `: ${bits.join(" · ")}` : " — nothing to change"}.`;
+}
+async function cmdSyncCalendar(env) { env.notice(syncSummary(await syncCalendar(env)), 8000); }
+
+/** Ask whether a task has a precise time (→ calendar) or can be done any time that day. */
+async function askClock(env, line) {
+  if (!getDate(line, "scheduled") && !getDate(line, "due")) return line;
+  const cur = parseFields(line).time;
+  const opts = cur ? [[`Keep 🕒 ${cur}`, "keep"], ["Any time that day (no calendar event)", ""], ["Another time…", "set"]] : [["Any time that day", ""], ["🕒 At a set time… (goes to the calendar)", "set"]];
+  const v = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), `🕒 Does “${taskDesc(line)}” have a set time?`);
+  if (v === null || v === undefined || v === "keep") return line;
+  if (v === "") return setClock(line, null);
+  for (;;) {
+    const t = await env.prompt(`🕒 Time for “${taskDesc(line)}” — e.g. 14:30 or 14:30-15:30`, cur || "");
+    if (t === null || t === undefined) return line;
+    const next = setClock(line, t);
+    if (next !== null) return next;
+    env.notice(`“${t}” isn't a time. Use e.g. 9:00, 14:30 or 14:30-15:30.`, 5000);
+  }
 }
 
 /* ------------------------------------------------------------------ rendering */
@@ -3398,7 +3801,7 @@ function renderProjects(d) {
 async function render(app, mode, path, opts = {}) {
   if (mode === "classified") return renderClassified(app);
   const d = await loadAll(app);
-  if (mode === "home") return renderHome(d, opts);
+  if (mode === "home") { d.cal = await gcalLoadState(app); d.calOn = !!d.cfg.calendar_client_id; return renderHome(d, opts); }
   if (mode === "week") return renderWeek(d, path, opts);
   if (mode === "project") { d.aiStore = await loadAnalysis(app); d.aiLines = ((await readPath(app, path)) || "").split("\n"); return renderProject(d, path); }
   if (mode === "analytics") return renderAnalytics(d, opts);
@@ -3408,7 +3811,7 @@ async function render(app, mode, path, opts = {}) {
 
 /* ------------------------------------------------------------------ entry */
 
-const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, applyInbox: cmdApplyInbox, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, cancelTask: cmdCancelTask, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
+const COMMANDS = { capture: cmdCapture, process: cmdProcess, classify: cmdClassify, applyInbox: cmdApplyInbox, plan: cmdPlan, planProject: cmdPlanProject, addTasks: cmdAddTasks, logTime: cmdLogTime, cancelTask: cmdCancelTask, syncCalendar: cmdSyncCalendar, review: cmdReview, newProject: cmdNewProject, register: cmdRegister };
 
 async function ptrack(tp, cmd, ...args) {
   const app = tp.app || window.app;
@@ -3431,7 +3834,7 @@ module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
   getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
-  cancelTask, cancelLine, isCancelled, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };

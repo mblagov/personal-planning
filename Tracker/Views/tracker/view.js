@@ -141,6 +141,33 @@ function cancelDialog(title) {
     setTimeout(() => inp.focus(), 30);
   });
 }
+/** Ask for a time of day. Resolves "14:30" / "14:30-15:30", "" for any time, or null when cancelled. */
+function clockDialog(core, title, cur) {
+  return new Promise((resolve) => {
+    if (!obsidian || !obsidian.Modal) { const v = window.prompt(`Time for “${title}” (e.g. 14:30 or 14:30-15:30, empty = any time)`, cur || ""); resolve(v === null ? null : v.trim()); return; }
+    const modal = new obsidian.Modal(obsApp);
+    let result = null;
+    modal.titleEl.setText(`🕒 ${title}`);
+    const el = modal.contentEl;
+    el.addClass("pt-time-modal");
+    el.innerHTML = `<div class="pt-muted pt-hint">A task with a set time goes to Google Calendar. Without one it can be done any time that day.</div>
+      <div class="pt-time-field"><label><b>Time</b><span class="pt-muted">e.g. 9:00, 14:30 or 14:30-15:30</span></label><div class="pt-time-input"><input type="text" placeholder="14:30" value="${(cur || "").replace(/"/g, "&quot;")}"></div></div>
+      <div class="pt-actions"><button class="mod-cta" data-ok="1">Save</button><button data-any="1">Any time</button><button data-x="1">Cancel</button></div>`;
+    const inp = el.querySelector("input");
+    const ok = () => {
+      const v = inp.value.trim();
+      if (v && !core.parseClockRange(v)) { inp.addClass("pt-bad"); inp.focus(); return; }
+      result = v; modal.close();
+    };
+    el.querySelector("[data-ok]").addEventListener("click", ok);
+    el.querySelector("[data-any]").addEventListener("click", () => { result = ""; modal.close(); });
+    el.querySelector("[data-x]").addEventListener("click", () => modal.close());
+    inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); ok(); } });
+    modal.onClose = () => resolve(result);
+    modal.open();
+    setTimeout(() => inp.focus(), 30);
+  });
+}
 
 const root = dv.el("div", "", { cls: "pt-root" });
 try {
@@ -161,6 +188,20 @@ try {
     opts.tasks = openTasks();
   }
 
+  // Google Calendar: sync in the background (Home, when the last sync is old enough, and after a time is set)
+  const calSync = async ({ quiet = true, force = false } = {}) => {
+    if (!cfg.calendar_client_id || window.__ptrackCalBusy) return null;
+    if (!force) {
+      const mins = Number(cfg.calendar_sync_minutes) || 0;
+      if (!mins || !(await core.gcalConnected(obsApp))) return null;
+      const st = await core.gcalLoadState(obsApp);
+      if (st.lastSync && Date.now() - new Date(st.lastSync).getTime() < mins * 60000) return null;
+    }
+    window.__ptrackCalBusy = true;
+    try { const r = await core.syncCalendar(env, { quiet }); if (r && !quiet) notify(core.syncSummary(r)); return r; }
+    catch (e) { console.error("[tracker] calendar", e); if (!quiet || /sign-in|connect/i.test(String(e.message))) notify(`Calendar: ${e.message || e}`); return null; } // offline: stay quiet
+    finally { window.__ptrackCalBusy = false; }
+  };
   const draw = async () => { root.innerHTML = await core.render(obsApp, mode, dv.currentFilePath, opts); bind(); };
   const logTime = async (row, hint) => {
     const title = (row.querySelector(".pt-task-text") || {}).textContent || "Task";
@@ -196,6 +237,12 @@ try {
       b.textContent = b.dataset.desc === "generate" ? "✨ Writing…" : b.dataset.desc.includes("check") ? "Checking…" : "Saving…";
       try { const msg = await core.descAction(env, b.dataset.desc, b.dataset.path); if (msg) notify(msg); }
       catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
+      await draw();
+    }));
+
+    root.querySelectorAll("button[data-cal]").forEach((b) => b.addEventListener("click", async () => {
+      b.disabled = true; b.textContent = "Syncing…";
+      await calSync({ quiet: false, force: true });
       await draw();
     }));
 
@@ -245,6 +292,16 @@ try {
           notify("Put the cursor on the task and run “Tasks: Create or edit task”.");
         }
       });
+      const clock = row.querySelector('[data-act="clock"]');
+      if (clock) clock.addEventListener("click", async () => {
+        const title = (row.querySelector(".pt-task-text") || {}).textContent || "Task";
+        const v = await clockDialog(core, title, clock.dataset.clock);
+        if (v === null) return;
+        const ok = await changeLine(row, async (line) => core.setClock(line, v));
+        if (!ok) return;
+        if (await core.gcalConnected(obsApp)) await calSync({ force: true });
+        await draw();
+      });
       const cancel = row.querySelector('[data-act="cancel"]');
       if (cancel) cancel.addEventListener("click", async () => {
         const title = (row.querySelector(".pt-task-text") || {}).textContent || "Task";
@@ -269,6 +326,7 @@ try {
     });
   }
   await draw();
+  if (mode === "home") { const r = await calSync(); if (r) await draw(); }
 } catch (e) {
   console.error("[tracker]", e);
   root.innerHTML = `<div class="pt-error">Tracker view error: ${String(e.message || e).replace(/</g, "&lt;")}</div>`;

@@ -13,6 +13,7 @@ plan_next_week_from: 5
 plan_schedule_tasks: true
 plan_due_dates: true
 plan_estimates: true
+plan_times: true
 log_time_on_done: true
 upcoming_days: 7
 task_tag: ""
@@ -30,6 +31,13 @@ finance_file: Finance/Spendings.md
 finance_project: ""
 currency: EUR
 llm_examples_per_project: 3
+calendar_client_id: ""
+calendar_client_secret: ""
+calendar_id: primary
+calendar_show: ""
+calendar_timezone: ""
+calendar_default_minutes: 30
+calendar_sync_minutes: 15
 ---
 # Tracker settings
 
@@ -46,6 +54,7 @@ Edit the values in the properties above. This note syncs, so both your Mac and y
 | `plan_schedule_tasks` | `true`: when you add a task to a goal, you choose the day (sets the Tasks ⏳ scheduled date). |
 | `plan_due_dates` | `true`: when you add a task to a goal, you can also set a deadline (the Tasks 📅 due date): a day of that week, or any other date. |
 | `plan_estimates` | `true`: when you plan a task, you're also asked how long it will take (hands-on). Saved as `[est:: 2h]`. |
+| `plan_times` | `true`: when you plan a task with a day, you're asked whether it has a set time. A time (`[time:: 14:30]` or `[time:: 14:30-15:30]`) puts it in Google Calendar; *any time that day* keeps it out. |
 | `log_time_on_done` | `true`: ticking a task that has an estimate in a Tracker view asks how long it actually took (active and passive time). Cancel to skip. |
 | `upcoming_days` | How many days ahead Home looks (after today) for *Next N days* and the *Outside focus* box. |
 | `task_tag` | If you use a Tasks *global filter* tag (e.g. `#task`), put it here so new tasks get it. Otherwise leave `""`. |
@@ -61,3 +70,9 @@ Edit the values in the properties above. This note syncs, so both your Mac and y
 | `finance_project` | A project for that task (e.g. `"[[Finance]]"`). Empty = the task sits in the finance note itself. |
 | `currency` | Currency for spendings that don't name one, e.g. `EUR`. |
 | `llm_examples_per_project` | How many recent tasks per project the model sees as examples. |
+| `calendar_client_id`, `calendar_client_secret` | Your Google OAuth client for the calendar sync (type *Desktop app*). Empty = no calendar. See *Start here → Google Calendar*. |
+| `calendar_id` | The calendar timed tasks go to: `primary` (your main calendar) or a calendar's id from Google Calendar → Settings → *Integrate calendar*. A separate “Tasks” calendar keeps them apart. |
+| `calendar_show` | More calendars whose events are shown on Home (ids, comma-separated), e.g. a family calendar. |
+| `calendar_timezone` | Time zone for events, e.g. `Europe/Vienna`. Empty = this device's. |
+| `calendar_default_minutes` | How long an event is when the task has only a start time and no estimate. With an estimate, the event lasts that long. |
+| `calendar_sync_minutes` | Home syncs with the calendar when it opens and the last sync is older than this. `0` = only when you press *Sync* or run **Sync calendar**. |

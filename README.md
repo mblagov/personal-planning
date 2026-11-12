@@ -39,8 +39,9 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 
 - [Obsidian](https://obsidian.md) with these community plugins:
   - **Dataview**, with *Enable JavaScript queries* turned on
-  - **Templater**: add the eleven files in `Tracker/Commands/` under *Template hotkeys*
+  - **Templater**: add the twelve files in `Tracker/Commands/` under *Template hotkeys*
   - **Tasks**: keep *Set done date on every completed task* on
+- Optional: a Google Cloud OAuth client (free) for the Google Calendar sync
 - Optional: a local model for sorting the inbox
   - Mac: [Ollama](https://ollama.com) (`ollama pull qwen2.5:7b-instruct`) or LM Studio
   - iPhone: Apple's on-device model, run through a Shortcut
@@ -101,6 +102,7 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
 | During the week | **Add tasks** | Adds tasks that came up to this week, in the project's `## Unplanned` section. They count like planned ones; Analytics shows the planned/unplanned split. |
 | During the week | **Log time** / ⏱ | Logs hands-on (`active`) and unattended (`passive`) time on a task. Planning asks for an estimate (`est`). Week notes, project pages and Analytics compare estimates with time spent. |
+| During the week | **Sync calendar** / 🕒 | Tasks with a set time (`[time:: 14:30]`) become Google Calendar events; moving or deleting an event changes the task back. Tasks for any time of the day stay out. Home shows your calendar events among the day's tasks. |
 | During the week | **Cancel task** / ✖ | Cancels a task that's no longer needed (optional reason). It moves to `## Done` as `[-]`, leaves every list, and is left out of goal progress — done ÷ (planned − cancelled). The week note, project page and Analytics count it as cancelled. |
 | Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records the week's routine score, wins, lessons, and energy. |
 | Anytime | **New project**, **Register projects** | Adds projects |
@@ -144,6 +146,7 @@ keywords: [boat, marina, berth]
 - `[result:: 0–100]` and `[miss:: no-time | blocked | deprioritized | underestimated | motivation | unclear]` are written by the weekly review.
 - `[-]` marks a cancelled task (✖, **Cancel task**, or dropped in the review), with an optional `[reason:: …]`. It's left out of progress and counted as cancelled. `[-]` with `⇢` means moved to another week or the backlog.
 - `[est:: 2h]` is the estimate of hands-on time; `[active:: 1h30m]` and `[passive:: 3h]` are the time spent working on it and the time it took without you (waiting, drying). Durations: `45m`, `2h`, `1h30m`, `1:30`.
+- `[time:: 14:30]` or `[time:: 14:30-15:30]` gives a task a set time, which puts it in Google Calendar; `[cal:: …]` links the event.
 - Every task the tracker adds gets a ➕ created date: the capture date for inbox items, today for tasks typed while planning.
 - Dates use the Tasks plugin's emoji: 📅 due, ⏳ scheduled, 🛫 start, ➕ created, ✅ done. Priorities use ⏫ 🔼 🔽.
 
@@ -180,7 +183,7 @@ All settings are in the frontmatter of [Tracker/Config.md](Tracker/Config.md). T
 
 ## Privacy
 
-Nothing leaves your machine unless you point the LLM settings elsewhere. The only network call is to the model URL in Config, which is `http://localhost:11434` (Ollama) by default.
+Nothing leaves your machine unless you point the LLM settings elsewhere or connect Google Calendar. The model URL in Config is `http://localhost:11434` (Ollama) by default. With the calendar connected, timed tasks (their text, time and a link to the note) are sent to Google Calendar, and your events for the next days are read back for Home. The Google sign-in is stored in `Tracker/AI/` inside your vault.
 
 ## License
 

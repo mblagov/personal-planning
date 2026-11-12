@@ -179,3 +179,13 @@
 .pt-task.is-cancelled { opacity: 0.4; text-decoration: line-through; transition: opacity 0.3s; }
 .pt-task-btn[data-act="cancel"]:hover { color: var(--text-error); }
 .pt-cancelled s { color: var(--text-muted); }
+
+/* Google Calendar */
+.pt-chip-clock { font-variant-numeric: tabular-nums; color: var(--text-accent); }
+.pt-event { display: flex; gap: 0.6em; align-items: baseline; padding: 4px 6px 4px 30px; font-size: var(--font-ui-small); border-left: 3px solid var(--color-blue, var(--interactive-accent)); margin: 2px 0; background: var(--background-secondary); border-radius: 4px; }
+.pt-event.is-allday { border-left-style: dashed; }
+.pt-event-time { font-variant-numeric: tabular-nums; color: var(--text-muted); min-width: 6.5em; }
+.pt-event-title { flex: 1; }
+.pt-event-title a { color: var(--text-normal); text-decoration: none; }
+.pt-anytime-head { margin-top: 6px; }
+.pt-cal-note .pt-mini { margin-left: 4px; }
