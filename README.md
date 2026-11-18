@@ -2,7 +2,7 @@
 
 An Obsidian-based personal planning system for juggling many projects at once.
 
-Each week you pick **5–7 projects**, set **one goal** for each, and plan dated tasks under those goals. A **local LLM** sorts anything you capture into the right project. Every Sunday a **weekly review** scores each goal and records why it fell short. Dashboards then show your momentum, the projects you've been neglecting, and where your weeks actually went.
+Each week you pick **5–7 projects**, set **one goal** for each, and plan dated tasks under those goals. A **local LLM** sorts anything you capture into the right project. Every Sunday a **weekly review** scores each goal and records why it fell short. Each project has a **priority from 1 (top) to 5 (someday)**, and planning follows it: finish the top projects rather than move every project a little. Dashboards then show your momentum, top-priority projects missing from the plan, and where your weeks actually went.
 
 Everything is plain Markdown. It runs on the Mac and on the iPhone.
 
@@ -96,7 +96,7 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
 | When convenient | **Process inbox** | The local LLM reads the whole inbox note (items and free text) and writes `Tracker/Classified inbox` for you to check: tasks and ideas → projects, references (places to visit, tips, links) → reference notes in `References/`, spendings → the finance note. The inbox isn't changed. |
 | After checking | **Apply inbox** | Files everything, asks about items without a destination (every menu has ← Back), adds one *Process new spendings* task, archives the inbox to `Inbox archive.md` and clears it. |
-| Anytime | **Projects** note | Set each project's priority (high / medium / low) and status. **Plan week** lists projects by priority. The local LLM can rate each description (the inbox sorter relies on them) and draft one from the project's folder. |
+| Anytime | **Projects** note | Set each project's priority (1 = top … 5 = someday) and status. **Plan week** lists projects by priority, and within a priority the ones you're already working on and closest to done first. The local LLM can rate each description (the inbox sorter relies on them) and draft one from the project's folder. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
 | Anytime | **Project note** → *Analyze* | The local LLM checks the open tasks against the objective and the week's goals: suggests missing tasks (add with one click) and merges duplicates. |
 | During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
@@ -177,9 +177,17 @@ A project with `kind: routine` holds recurring tasks (🔁) and is always in foc
 
 See *Routines* in [Tracker/Start here.md](Tracker/Start%20here.md).
 
+## Upgrading an existing vault
+
+After pulling a new version, run `scripts/update-vault.py` (it shows its plan and asks first), then in Obsidian run **Register projects** once. Version-specific steps:
+
+- **Priorities 1–5:** Register projects rewrites old `priority: high / medium / low` as `2 / 3 / 4` (unset stays 3). Then open `Tracker/Projects` and give your most important projects `1` and the ones you're happy to leave alone `4`–`5`. The Config setting `neglect_weeks` is replaced by `focus_priority` (default `2`): the update adds it, and the old key can be deleted.
+- **Google Calendar (optional):** fill in `calendar_client_id` / `calendar_client_secret` and run **Sync calendar** on the Mac — see *Start here → Google Calendar*.
+- **New commands:** add `Cancel task.md` and `Sync calendar.md` from `Tracker/Commands/` under Templater → Template hotkeys.
+
 ## Settings
 
-All settings are in the frontmatter of [Tracker/Config.md](Tracker/Config.md). They include the goal range, the neglect threshold, the LLM provider, URL and model, and the confidence above which items are filed automatically. The note itself explains each setting.
+All settings are in the frontmatter of [Tracker/Config.md](Tracker/Config.md). They include the goal range, which priorities must be in every week's plan (`focus_priority`), the LLM provider, URL and model, and the confidence above which items are filed automatically. The note itself explains each setting.
 
 ## Privacy
 

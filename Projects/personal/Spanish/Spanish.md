@@ -1,5 +1,6 @@
 ---
 type: project
+priority: 5
 status: backlog
 scope: personal
 description: "Learning Spanish: lessons, vocabulary practice, and speaking."

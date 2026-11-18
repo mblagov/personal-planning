@@ -1,5 +1,6 @@
 ---
 type: project
+priority: 4
 status: active
 scope: common
 description: "Planning the family winter holiday: dates, flights, accommodation, packing."

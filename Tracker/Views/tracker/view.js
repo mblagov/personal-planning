@@ -228,7 +228,7 @@ try {
       const file = obsApp.vault.getAbstractFileByPath(sel.dataset.path);
       if (!file) { notify("Couldn't find that project note any more."); return; }
       sel.disabled = true;
-      try { await obsApp.fileManager.processFrontMatter(file, (f) => { f[sel.dataset.key] = sel.value; }); }
+      try { await obsApp.fileManager.processFrontMatter(file, (f) => { f[sel.dataset.key] = /^\d+$/.test(sel.value) ? Number(sel.value) : sel.value; }); }
       catch (e) { notify(`Couldn't save: ${e.message || e}`); sel.disabled = false; }
     }));
     // Projects note: rate / write descriptions with the local model

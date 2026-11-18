@@ -8,7 +8,7 @@ weeks_folder: Tracker/Weeks
 inbox: Tracker/Inbox.md
 goals_min: 5
 goals_max: 7
-neglect_weeks: 3
+focus_priority: 2
 plan_next_week_from: 5
 plan_schedule_tasks: true
 plan_due_dates: true
@@ -49,7 +49,7 @@ Edit the values in the properties above. This note syncs, so both your Mac and y
 | `ignored_folders` | Folders you marked *Not a project* in **Register projects**. Remove a folder from this list to be asked about it again. |
 | `weeks_folder`, `inbox` | Where week notes and the inbox live. |
 | `goals_min`, `goals_max` | How many weekly goals you aim for. Planning nudges you toward this range. |
-| `neglect_weeks` | An active project that hasn't been in focus for this many weeks is flagged. |
+| `focus_priority` | Active projects with this priority or higher (1 = top, so `2` means P1 and P2) are flagged on Home and in Analytics when they aren't in this week's plan. Lower priorities are never flagged: leaving them alone while you finish the top ones is the point. `0` = flag nothing. |
 | `plan_next_week_from` | From this weekday (1 = Mon … 7 = Sun), **Plan week** suggests next week first. |
 | `plan_schedule_tasks` | `true`: when you add a task to a goal, you choose the day (sets the Tasks ⏳ scheduled date). |
 | `plan_due_dates` | `true`: when you add a task to a goal, you can also set a deadline (the Tasks 📅 due date): a day of that week, or any other date. |

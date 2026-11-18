@@ -1,5 +1,6 @@
 ---
 type: project
+priority: 3
 status: active
 scope: personal
 description: "My personal blog about software and side projects: drafts, publishing, site upkeep."

@@ -44,7 +44,7 @@ Settings → Community plugins → Browse. Install and enable:
    - Folders you mark *Not a project* are remembered (`ignored_folders` in Config) and not asked about again.
    - Safe to run again later — it only asks about new folders.
 3. Give each active project a one-line **description** (note properties). The inbox classifier reads these; good descriptions matter more than the model.
-   Then open `Tracker/Projects` and set each project's **priority** (high / medium / low) and status with the dropdowns. Once the local model runs (next step), press **Check descriptions** there: the inbox model sorts notes by these descriptions, so weak ones are worth fixing (**✨ Write** drafts one from the project's folder).
+   Then open `Tracker/Projects` and set each project's **priority** (1 = top … 5 = someday) and status with the dropdowns. Once the local model runs (next step), press **Check descriptions** there: the inbox model sorts notes by these descriptions, so weak ones are worth fixing (**✨ Write** drafts one from the project's folder).
 4. Click **Plan week**.
 
 ## 4. Local LLM on the Mac (Ollama)
@@ -197,7 +197,7 @@ Recurring routines live in **routine projects** — one per scope, e.g. `Project
 
 ## 9. What you see
 
-- **Projects** (`Tracker/Projects`): every project grouped by status and ordered by priority, with dropdowns to change **priority** and **status** (saved in the project's properties), whether it's in this / next week's plan, last focus, average score and backlog size; routine projects in their own table. **Plan week** lists projects by priority (then the longest without focus), and *Needs attention* puts high-priority projects first.
+- **Projects** (`Tracker/Projects`): every project grouped by status and ordered by priority, with dropdowns to change **priority** and **status** (saved in the project's properties), whether it's in this / next week's plan, last focus, average score and backlog size; routine projects in their own table. **Plan week** lists projects by priority, and within a priority first the ones you're already working on, then the ones with the fewest open tasks left — so you finish projects instead of moving all of them a little. *Needs attention* (Home) and Analytics flag only top-priority projects (P1 to `focus_priority`, default P2) that aren't in this week's plan; lower priorities are never flagged, however long you leave them.
   - **Description quality** (needs the local model): **Check descriptions** has the model rate every new or changed description from 0 to 100 — is it clear, distinct from your other projects, concrete, short — and gives a badge (✓ good · ~ could be better · ! weak), the main problems and a better wording you can take with **Use this**. **Check** / **Re-check** rates one project. Edit a description and its badge turns to *changed* until you check it again.
   - **✨ Write** drafts a description (and keywords, if the project has none) from what's in the project's folder: the project note and the other notes and file names in its folder, about 6,000 characters. Nothing is saved until you press **Use it**; **Dismiss** throws it away, **↻ Again** writes another. Ratings and drafts are kept in `Tracker/AI/descriptions.json`.
 - **Home**: buttons, this week's goals with progress (reorder the projects with the ↑ ↓ buttons on each row — it moves the goal lines in the week note, so the week note and the focus list follow the same order), focus tasks (today / later this week / any day), the *Outside this week's focus* box, inbox count, 8-week momentum, what needs attention.
@@ -234,7 +234,7 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - `[time:: 14:30]` / `[time:: 14:30-15:30]` = a set time → Google Calendar; `[cal:: …]` = the linked event (written by the sync).
 - `[unplanned:: 2026-W46]` = added during that week with **Add tasks** (lives in `## Unplanned` until the review moves it on).
 - Routine occurrences: `[missed:: yes]` on a `[-]` line = missed (counts against the routine score); `[-]` without it = skipped.
-- Project properties: `type: project`, `status: active | backlog | done`, `priority: high | medium | low` (unset = medium), `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.
+- Project properties: `type: project`, `status: active | backlog | done`, `priority: 1–5` (1 = top, unset = 3; old `high / medium / low` are read as 2 / 3 / 4), `scope`, `description`, `objective`, `keywords`; `kind: routine` for a routine project.
 
 ## 11. Google Calendar
 

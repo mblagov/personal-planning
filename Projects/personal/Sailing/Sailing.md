@@ -1,5 +1,6 @@
 ---
 type: project
+priority: 1
 status: active
 scope: personal
 description: "Owning and maintaining my sailboat: berth, repairs, gear, and trips."

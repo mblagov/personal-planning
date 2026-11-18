@@ -20,7 +20,7 @@ const DEFAULTS = {
   inbox: "Tracker/Inbox.md",
   goals_min: 5,
   goals_max: 7,
-  neglect_weeks: 3,
+  focus_priority: 2,            // projects with this priority or higher (1 = top) are flagged when they're not in the week's plan
   plan_next_week_from: 5,
   llm_provider: "ollama",
   llm_url: "http://localhost:11434",
@@ -113,7 +113,7 @@ function getConfig(app) {
   for (const k of Object.keys(DEFAULTS)) if (fm[k] !== undefined && fm[k] !== null && fm[k] !== "") cfg[k] = fm[k];
   cfg.project_roots = toArr(cfg.project_roots).map((r) => r.replace(/\/+$/, ""));
   cfg.weeks_folder = String(cfg.weeks_folder).replace(/\/+$/, "");
-  for (const k of ["goals_min", "goals_max", "neglect_weeks", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project", "calendar_default_minutes", "calendar_sync_minutes"]) cfg[k] = Number(cfg[k]);
+  for (const k of ["goals_min", "goals_max", "focus_priority", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project", "calendar_default_minutes", "calendar_sync_minutes"]) cfg[k] = Number(cfg[k]);
   return cfg;
 }
 
@@ -387,16 +387,30 @@ function listProjects(app, cfg) {
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
-/* Project priority (frontmatter `priority`): high | medium | low, set in Tracker/Projects. Unset = medium. */
-const PROJECT_PRIOS = ["high", "medium", "low"];
-const PRIO_LABEL = { high: "⏫ high", medium: "medium", low: "🔽 low" };
+/* Project priority (frontmatter `priority`): 1 (top) … 5 (someday), set in Tracker/Projects. Unset = 3.
+   Older notes may still say high / medium / low: read as 2 / 3 / 4 (Register projects rewrites them). */
+const PROJECT_PRIOS = [1, 2, 3, 4, 5];
+const PRIO_LABEL = { 1: "1 · top", 2: "2 · high", 3: "3 · medium", 4: "4 · low", 5: "5 · someday" };
+const LEGACY_PRIO = { high: 2, h: 2, medium: 3, m: 3, low: 4, l: 4 };
 function normPriority(v) {
   const s = String(v ?? "").trim().toLowerCase();
-  if (s === "1" || s === "high" || s === "h") return "high";
-  if (s === "3" || s === "low" || s === "l") return "low";
-  return "medium";
+  if (/^[1-5]$/.test(s)) return Number(s);
+  return LEGACY_PRIO[s] || 3;
 }
-const projPrioRank = (p) => PROJECT_PRIOS.indexOf(p.priority || "medium");
+const projPrioRank = (p) => p.priority || 3;
+const isTopPrio = (cfg, p) => (p.priority || 3) <= (Number(cfg.focus_priority) || 0);
+/** Rewrite high / medium / low (older versions) as 2 / 3 / 4. Returns how many notes changed. */
+async function migratePriorities(app, cfg) {
+  let n = 0;
+  for (const p of listProjects(app, cfg)) {
+    const fm = app.metadataCache.getFileCache(p.file)?.frontmatter || {};
+    const v = String(fm.priority ?? "").trim().toLowerCase();
+    if (!LEGACY_PRIO[v]) continue;
+    await app.fileManager.processFrontMatter(p.file, (f) => { f.priority = LEGACY_PRIO[v]; });
+    n++;
+  }
+  return n;
+}
 function weekPath(cfg, id) { return `${cfg.weeks_folder}/${id}.md`; }
 function weekFiles(app, cfg) {
   const pre = cfg.weeks_folder + "/";
@@ -619,6 +633,7 @@ async function loadAll(app) {
     const lines = (await app.vault.cachedRead(p.file)).split("\n");
     linesByPath.set(p.path, lines);
     p.backlog = backlogItems(lines).sort(byPrioDue);
+    p.openPlanned = parseItems(lines).filter((t) => t.task && !t.parent && isOpen(t) && t.fields.week).length;
     const ns = findSection(lines, "Notes & ideas");
     p.notes = ns ? parseItems(lines, ns.start, ns.end).filter((i) => !i.parent) : [];
   }
@@ -2076,6 +2091,8 @@ async function cmdRegister(env) {
   }
   // projects registered outside the scanned folders (e.g. by hand) get the sections too
   for (const p of listProjects(app, getConfig(app))) if (await upgradeProjectNote(app, p.file)) upgraded++;
+  const reprio = await migratePriorities(app, getConfig(app));
+  if (reprio) env.notice(`Priorities: ${reprio} project(s) changed from high / medium / low to 2 / 3 / 4 — adjust them in Tracker/Projects.`, 10000);
   env.notice(`Registered ${added} project(s); ${seen} already set up or ignored${upgraded ? `; added the “${PLANNED_SEC}” section to ${upgraded} existing project note(s)` : ""}. Add a one-line description to each — it makes the inbox classifier much better.`, 10000);
 }
 async function upgradeProjectNote(app, file) {
@@ -2465,15 +2482,17 @@ async function cmdPlan(env, forcedId) {
     const pickedOpen = (pp) => (picked.get(pp) ? picked.get(pp).here.filter(isOpen).length : 0);
     const active = data.projects.filter((p) => p.status === "active" && !p.routine); // routines are always in focus, no goal needed
     const noGoal = data.projects.filter((p) => !goalByProject.has(p.path) && pickedOpen(p.path));
+    // Finish before you start: priority first; within a priority, projects you're already working on, then the ones closest to done.
+    const left = (p) => p.backlog.length + (p.openPlanned || 0);
+    const recent = (p) => (p.weeksSince === null ? 999 : Math.max(0, p.weeksSince));
     const fresh = active.filter((p) => !goalByProject.has(p.path) && !pickedOpen(p.path))
-      .sort((a, b) => projPrioRank(a) - projPrioRank(b) || (b.weeksSince ?? 999) - (a.weeksSince ?? 999) || a.name.localeCompare(b.name));
+      .sort((a, b) => projPrioRank(a) - projPrioRank(b) || recent(a) - recent(b) || left(a) - left(b) || a.name.localeCompare(b.name));
     const meta = (p) => {
-      const bits = [];
-      if (p.priority !== "medium") bits.push(PRIO_LABEL[p.priority]);
+      const bits = [`P${p.priority}`];
       if (new Set(active.map((x) => x.scope)).size > 1) bits.push(p.scope);
-      bits.push(p.lastFocus ? (p.weeksSince <= 0 ? "focused this week" : `last focus ${p.weeksSince}w ago`) : "never focused");
+      bits.push(p.lastFocus ? (p.weeksSince <= 0 ? "in focus this week" : p.weeksSince === 1 ? "in focus last week" : `last focus ${p.weeksSince}w ago`) : "not started");
       if (p.avg !== null) bits.push(`avg ${p.avg}%`);
-      if (p.backlog.length) bits.push(`${p.backlog.length} in backlog`);
+      bits.push(left(p) ? `${left(p)} open task(s) left` : "no open tasks");
       return bits.join(" · ");
     };
     const opts = [];
@@ -2482,7 +2501,8 @@ async function cmdPlan(env, forcedId) {
     for (const p of noGoal) opts.push([`◐ ${p.name} — ${pickedOpen(p.path)} task(s) picked, no goal yet`, { a: "goal", p }]);
     for (const p of fresh) opts.push([`${p.name}  ·  ${meta(p)}`, { a: "goal", p }]);
     opts.push(["＋ Activate a backlog project…", { a: "activate" }], ["＋ New project…", { a: "new" }]);
-    const header = n >= cfg.goals_max ? `${target}: ${n} goals — that's your max of ${cfg.goals_max}. Finish?` : `${target}: pick a project to set a goal (${n}/${cfg.goals_max})`;
+    const top = fresh[0];
+    const header = n >= cfg.goals_max ? `${target}: ${n} goals — that's your max of ${cfg.goals_max}. Finish?` : `${target}: pick a project to set a goal (${n}/${cfg.goals_max}) · highest priority first${top ? ` — next: ${top.name} (P${top.priority})` : ""}`;
     const c = await env.suggest(opts.map((o) => o[0]), opts.map((o) => o[1]), header);
     if (c === null || c === undefined || c.a === "done") break;
     if (c.a === "tasks") {
@@ -3474,9 +3494,10 @@ function baseline(d, before, key) {
   const ws = d.weeks.filter((w) => w.id < before && w.m.goals).slice(-4);
   return ws.length ? mean(ws.map((w) => (key === "rate" ? (100 * w.m.achieved) / w.m.goals : w.m[key]))) : null;
 }
+/** Active projects of top priority (≤ focus_priority) without a goal this week. Lower priorities may wait as long as they like. */
 function neglected(d) {
-  return d.projects.filter((p) => p.status === "active" && !p.routine && !d.weekMap.get(d.curId)?.goals.some((g) => g.projectPath === p.path) && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks))
-    .sort((a, b) => projPrioRank(a) - projPrioRank(b) || (b.weeksSince ?? 999) - (a.weeksSince ?? 999));
+  return d.projects.filter((p) => p.status === "active" && !p.routine && isTopPrio(d.cfg, p) && !d.weekMap.get(d.curId)?.goals.some((g) => g.projectPath === p.path))
+    .sort((a, b) => projPrioRank(a) - projPrioRank(b) || a.name.localeCompare(b.name));
 }
 
 function renderHome(d, opts = {}) {
@@ -3499,7 +3520,7 @@ function renderHome(d, opts = {}) {
   const att = [];
   const unrev = d.weeks.filter((x) => x.id < d.curId && x.status !== "reviewed" && x.goals.length);
   for (const x of unrev.slice(-2)) att.push(`${link(x.path, x.id)} not reviewed`);
-  for (const p of neglected(d).slice(0, 5)) att.push(`${link(p.path, p.name)} <span class="pt-muted">${p.weeksSince === null ? "never focused" : `${p.weeksSince}w without focus`}</span>`);
+  for (const p of neglected(d).slice(0, 5)) att.push(`${link(p.path, p.name)} <span class="pt-muted">P${p.priority} · not in this week's plan</span>`);
   h += `<div class="pt-card"><div class="pt-h">Needs attention</div>${att.length ? `<ul class="pt-list">${att.map((a) => `<li>${a}</li>`).join("")}</ul>` : `<div class="pt-muted">Nothing — nice.</div>`}</div>`;
   h += `</div>`;
   const act = d.projects.filter((p) => p.status === "active" && !p.routine).length, back = d.projects.filter((p) => p.status === "backlog" && !p.routine).length;
@@ -3737,7 +3758,7 @@ function renderAnalytics(d, opts = {}) {
   h += `<div class="pt-card"><div class="pt-h">Projects</div><table class="pt-table"><thead><tr><th>Project</th><th class="pt-num">Focus wks</th><th class="pt-num">Avg</th><th class="pt-num">Last 4</th><th class="pt-num">Tasks done</th><th class="pt-num" title="Tasks picked for a week: planned / added during the week (Add tasks), last ${ids.length} weeks">Planned / unplanned</th><th class="pt-num" title="Tasks cancelled during the week, last ${ids.length} weeks — not counted as planned or done">Cancelled</th><th class="pt-num">Backlog</th><th>Last focus</th></tr></thead><tbody>`;
   for (const p of [...d.projects].filter((p) => !p.routine && (p.status === "active" || p.focusWeeks)).sort((a, b) => (b.focusWeeks - a.focusWeeks) || a.name.localeCompare(b.name))) {
     const trend = p.avg !== null && p.recentAvg !== null && p.focusWeeks > 4 ? (p.recentAvg - p.avg >= 5 ? ` <span class="pt-up">▲</span>` : p.avg - p.recentAvg >= 5 ? ` <span class="pt-down">▼</span>` : "") : "";
-    const stale = p.status === "active" && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks);
+    const stale = p.status === "active" && isTopPrio(d.cfg, p) && !(p.weeksSince !== null && p.weeksSince <= 0);
     h += `<tr><td>${link(p.path, p.name)}${p.status !== "active" ? ` <span class="pt-muted">${esc(p.status)}</span>` : ""}</td><td class="pt-num">${p.focusWeeks}</td><td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.recentAvg === null ? "–" : p.recentAvg + "%"}${trend}</td><td class="pt-num">${p.tasksDone}</td>${mixCell(mixSum(d, ids, p.path))}<td class="pt-num">${mixSum(d, ids, p.path).cancelled || `<span class="pt-muted">–</span>`}</td><td class="pt-num">${p.backlog.length}</td><td class="${stale ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td></tr>`;
   }
   h += `</tbody></table></div>`;
@@ -3748,9 +3769,9 @@ function renderAnalytics(d, opts = {}) {
     const max = reasons[0][1];
     h += reasons.map(([k, v]) => `<div class="pt-hbar"><span class="pt-hbar-label">${esc(reasonLabel(k))}</span><div class="pt-hbar-track"><div class="pt-hbar-fill" style="width:${(100 * v) / max}%"></div></div><span class="pt-num">${v}</span></div>`).join("");
   } else h += `<div class="pt-muted">No reasons recorded yet — they come from the weekly review.</div>`;
-  h += `</div><div class="pt-card"><div class="pt-h">Active but out of focus (${d.cfg.neglect_weeks}+ weeks)</div>`;
+  h += `</div><div class="pt-card"><div class="pt-h">Top priority (P1–P${d.cfg.focus_priority}) not in this week's plan</div>`;
   const ng = neglected(d);
-  h += ng.length ? `<ul class="pt-list">${ng.map((p) => `<li>${link(p.path, p.name)} <span class="pt-muted">${p.weeksSince === null ? "never focused" : `${p.weeksSince}w`}</span></li>`).join("")}</ul><div class="pt-muted pt-hint">Pick one next week — or move it to backlog so your active list stays honest.</div>` : `<div class="pt-muted">None.</div>`;
+  h += ng.length ? `<ul class="pt-list">${ng.map((p) => `<li>${link(p.path, p.name)} <span class="pt-muted">P${p.priority}${p.lastFocus ? ` · last focus ${p.weeksSince}w ago` : " · not started"}</span></li>`).join("")}</ul><div class="pt-muted pt-hint">Your top projects come first — or lower their priority so the list stays honest. Lower priorities aren't flagged: it's fine to leave them alone until the top ones are done.</div>` : `<div class="pt-muted">None.</div>`;
   h += `</div></div>`;
 
   const reviewed = d.weeks.filter((w) => w.review && (w.review.energy || w.review.summary || w.review.wins)).slice(-6).reverse();
@@ -3798,8 +3819,8 @@ function renderProjects(d) {
   if (!work.length) return h + `<div class="pt-empty">No projects yet — run <b>Register projects</b>.</div></div>`;
   const cur = d.weekMap.get(d.curId), next = d.weekMap.get(shiftWeek(d.curId, 1));
   const inWeek = (w, p) => !!(w && (w.goals.some((g) => g.projectPath === p.path) || (w.extra || []).some((x) => x.projectPath === p.path)));
-  const counts = PROJECT_PRIOS.map((k) => `${PRIO_LABEL[k]}: ${work.filter((p) => p.status === "active" && p.priority === k).length}`).join(" · ");
-  h += `<div class="pt-summary">${work.filter((p) => p.status === "active").length} active (${counts}) · ${work.filter((p) => p.status === "backlog").length} backlog · Plan week lists projects by priority.</div>`;
+  const counts = PROJECT_PRIOS.map((k) => `P${k}: ${work.filter((p) => p.status === "active" && p.priority === k).length}`).join(" · ");
+  h += `<div class="pt-summary">${work.filter((p) => p.status === "active").length} active (${counts}) · ${work.filter((p) => p.status === "backlog").length} backlog · Plan week lists projects by priority (1 = top), and within a priority the ones you're working on and closest to done first.</div>`;
   const live = work.filter(liveStatus), stOf = (p) => { const st = store[p.path]; return st && st.verdict && st.hash === descHash(p) ? st.verdict : p.description ? "unchecked" : "missing"; };
   const dc = (v) => live.filter((p) => stOf(p) === v).length;
   h += `<div class="pt-desc-bar"><span>Descriptions <span class="pt-muted">(the inbox model sorts notes by them)</span>: ${[["good", "✓ good"], ["fair", "could be better"], ["weak", "weak"], ["missing", "missing"], ["unchecked", "not checked"]].filter(([v]) => dc(v)).map(([v, l]) => `<span class="pt-q pt-q-${v}">${dc(v)} ${l}</span>`).join(" ")}</span>${dc("unchecked") + live.filter((p) => store[p.path] && store[p.path].verdict && store[p.path].hash !== descHash(p)).length ? `<button class="pt-mini mod-cta" data-desc="check-all">Check descriptions</button>` : `<button class="pt-mini" data-desc="recheck-all">Check all again</button>`}</div>`;
@@ -3813,7 +3834,7 @@ function renderProjects(d) {
       const wk = [inWeek(cur, p) ? "this" : "", inWeek(next, p) ? "next" : ""].filter(Boolean).join(" + ");
       h += `<tr class="pt-prio-${p.priority}"><td>${link(p.path, p.name)}${descCell(p, store[p.path])}</td>`
         + `${multiScope ? `<td class="pt-muted">${esc(p.scope)}</td>` : ""}<td>${selectHtml(p.path, "priority", p.priority, PROJECT_PRIOS, PRIO_LABEL)}</td><td>${selectHtml(p.path, "status", p.status, STATUSES)}</td>`
-        + `<td>${wk ? `🎯 ${wk}` : `<span class="pt-muted">–</span>`}</td><td class="${p.status === "active" && (p.weeksSince === null || p.weeksSince >= d.cfg.neglect_weeks) ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td>`
+        + `<td>${wk ? `🎯 ${wk}` : `<span class="pt-muted">–</span>`}</td><td class="${p.status === "active" && isTopPrio(d.cfg, p) && !(p.weeksSince !== null && p.weeksSince <= 0) ? "pt-warn" : ""}">${p.lastFocus ? (p.weeksSince <= 0 ? "this week" : `${p.weeksSince}w ago`) : "never"}</td>`
         + `<td class="pt-num">${p.avg === null ? "–" : p.avg + "%"}</td><td class="pt-num">${p.backlog.length}</td></tr>`;
     }
     h += `</tbody></table></div></div>`;
@@ -3871,5 +3892,5 @@ module.exports.core = {
   getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
   cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
-  weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
+  normPriority, migratePriorities, weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };

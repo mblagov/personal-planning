@@ -133,8 +133,9 @@
 .pt-projects td { vertical-align: top; }
 .pt-desc { font-size: var(--font-ui-smaller); max-width: 32em; }
 .pt-select { font-size: var(--font-ui-small); padding: 0 1.6em 0 .5em; height: auto; min-height: 1.8em; }
-.pt-prio-high .pt-select-priority { color: var(--text-error); font-weight: 600; }
-.pt-prio-low .pt-select-priority { color: var(--text-muted); }
+.pt-prio-1 .pt-select-priority { color: var(--text-error); font-weight: 700; }
+.pt-prio-2 .pt-select-priority { color: var(--text-error); }
+.pt-prio-4 .pt-select-priority, .pt-prio-5 .pt-select-priority { color: var(--text-muted); }
 
 /* Project descriptions (rated / written by the local model) */
 .pt-desc-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; font-size: var(--font-ui-small); margin: 4px 0 10px; }

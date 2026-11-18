@@ -1,5 +1,6 @@
 ---
 type: project
+priority: 2
 status: active
 scope: common
 description: "Shared home projects: renovating the kitchen and bathroom, contractors, materials."
