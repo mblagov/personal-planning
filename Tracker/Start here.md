@@ -289,7 +289,7 @@ Obsidian stays usable while the model works, and you can keep editing. The model
 | Tasks query shows an error | Update the Tasks plugin. |
 | Calendar: “isn't connected — run Sync calendar on the Mac” | Run **Sync calendar** on the Mac once (section 11). The iPhone can't do the sign-in itself. |
 | Calendar: “sign-in has expired or was revoked” | Run **Sync calendar** on the Mac again. With the consent screen in *Testing* this happens every 7 days — publish the app to stop it. |
-| Calendar: “access_denied” in the browser | Add your Google address as a test user on the OAuth consent screen. |
+| Calendar: “access_denied”, or *“… has not completed the Google verification process … can only be accessed by developer-approved testers”* in the browser | The Google account you signed in with isn't a test user. Google Cloud console → **Google Auth Platform → Audience → Test users → + Add users** → that exact address; wait a minute, run **Sync calendar** again and sign in with that account. (Or *Publish app* on the same page.) |
 | A timed task isn't in the calendar | It needs a day (⏳ or 📅) today or later, and must be open. Press *Sync* on Home. |
 
 All settings are in `Tracker/Config`. The look is in `Tracker/Views/tracker/view.css` and uses your theme's colours.
