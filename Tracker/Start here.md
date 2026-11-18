@@ -159,7 +159,7 @@ Tasks use the Tasks plugin's emoji format: `📅` due · `⏳` scheduled · `�
    - **References** → a reference note in `reference_folder` (default `References/`, one note per topic: Travel, Recipes, Home & tools…): `- 📎 Naschmarkt is best on Saturday mornings [to:: [[Travel]]]`. Places to visit, recommendations, how-tos and links **never go into projects** — a place to visit goes to Travel even if you have a trip project. When no note fits, the model proposes a new one (`[new:: reference note]`); it's created when you apply.
    - **Spendings** → `- 💶 Groceries at the market [amount:: 86.4] [currency:: EUR] [date:: 2026-11-08] [category:: groceries]`.
    Edit anything: change `[to:: …]` to another project or note, move a line to another section to change what it is, fix the text or the amount, delete lines. `[check:: unsure]` marks items the model wasn't sure about (`llm_flag_below`). Add `[week:: 2026-W46]` to a task to plan it for that week. The summary at the top counts what goes where.
-2. **Apply inbox** (the button in the Classified inbox, or run Process inbox again) files everything: tasks to the project's `## Backlog` (or `## Planned` with `[week::]`), ideas 💡 to `## Notes & ideas`, references 📎 to the end of their reference note, spendings to `finance_file` under *Unprocessed* — plus **one** task *Process N new spending(s)* (in that note, or in `finance_project`), which is updated rather than repeated next time. Items still at `[to:: none]` are asked about one by one: a project, a reference note, a new reference note, change the type, leave it in the inbox, or delete. **Every menu has ← Back**, and *← Back to the previous item* re-opens your last choice; nothing is written until the final *Apply* (which also has *← Back to the questions*; Esc cancels everything). Then the inbox is cleared — what it held is kept in `Tracker/Inbox archive.md` — except items you chose to leave, and anything you added to the inbox after classifying.
+2. **Apply inbox** (the button in the Classified inbox, or run Process inbox again) files everything: tasks to the project's `## Backlog` (or `## Planned` with `[week::]`), ideas 💡 to `## Notes & ideas`, references 📎 to the end of their reference note, spendings to `finance_file` under *Unprocessed* — plus **one** task *Process N new spending(s)* (in that note, or in `finance_project`), which is updated rather than repeated next time. Items still at `[to:: none]` (or pointing to a project that doesn't exist) are asked about one by one: a project, **＋ a new project** (name — offered from what the review said —, folder, one-line description; the note is created when you apply, and later items can be filed into it too), a reference note, a new reference note, change the type, leave it in the inbox, or delete. **Every menu has ← Back**, and *← Back to the previous item* re-opens your last choice; nothing is written until the final *Apply* (which also has *← Back to the questions*; Esc cancels everything). Then the inbox is cleared — what it held is kept in `Tracker/Inbox archive.md` — except items you chose to leave, and anything you added to the inbox after classifying.
 
 **During the week.** Work from Home → Today. A goal's progress = share of its tasks done.
 
@@ -263,7 +263,16 @@ Some tasks happen at a set time (a call at 14:30, the dentist), others can be do
 
 The sign-in is stored in `Tracker/AI/google-calendar-token.json` and syncs with the vault, so the iPhone uses it too — no sign-in needed there. Anyone with that file can edit your calendar events: keep the vault private. To disconnect, delete that file (and remove the app at myaccount.google.com → *Security → Third-party access*). While the consent screen is in *Testing*, Google expires the sign-in after 7 days — then run **Sync calendar** on the Mac again; publishing the app (*Audience → Publish app*, no review needed for your own use) avoids that.
 
-## 12. If something doesn't work
+## 12. Watching the model work
+
+Every job of the local model — sorting the inbox, checking or writing descriptions, analyzing a project, the review summary — shows a **progress panel** in the corner: what it's doing, *3/12* and the item it's on, a bar, the time so far and roughly how long is left. **Stop** ends it right away (an answer that still arrives is ignored):
+- inbox: what's sorted so far goes to the Classified inbox; the rest is listed there without a destination;
+- *Check descriptions*: the ones already checked keep their new rating;
+- a single check, ✨ Write, Analyze, the summary: nothing changes.
+
+Obsidian stays usable while the model works, and you can keep editing. The model's results are written only at the end (the Classified inbox, a description proposal, the project review); nothing is filed into your notes until you apply it. Clicking the panel hides it — the job carries on.
+
+## 13. If something doesn't work
 
 | What you see | Fix |
 |---|---|

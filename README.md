@@ -95,7 +95,7 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 |---|---|---|
 | Any time | **Capture** | Adds one item per line to `Tracker/Inbox.md` |
 | When convenient | **Process inbox** | The local LLM reads the whole inbox note (items and free text) and writes `Tracker/Classified inbox` for you to check: tasks and ideas → projects, references (places to visit, tips, links) → reference notes in `References/`, spendings → the finance note. The inbox isn't changed. |
-| After checking | **Apply inbox** | Files everything, asks about items without a destination (every menu has ← Back), adds one *Process new spendings* task, archives the inbox to `Inbox archive.md` and clears it. |
+| After checking | **Apply inbox** | Files everything, asks about items without a destination (every menu has ← Back; ＋ New project creates one), adds one *Process new spendings* task, archives the inbox to `Inbox archive.md` and clears it. |
 | Anytime | **Projects** note | Set each project's priority (1 = top … 5 = someday) and status. **Plan week** lists projects by priority, and within a priority the ones you're already working on and closest to done first. The local LLM can rate each description (the inbox sorter relies on them) and draft one from the project's folder. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
 | Anytime | **Project note** → *Analyze* | The local LLM checks the open tasks against the objective and the week's goals: suggests missing tasks (add with one click) and merges duplicates. |
@@ -190,6 +190,8 @@ After pulling a new version, run `scripts/update-vault.py` (it shows its plan an
 All settings are in the frontmatter of [Tracker/Config.md](Tracker/Config.md). They include the goal range, which priorities must be in every week's plan (`focus_priority`), the LLM provider, URL and model, and the confidence above which items are filed automatically. The note itself explains each setting.
 
 ## Privacy
+
+While the local model works, a progress panel shows the step, the current item and the time left, with a **Stop** button.
 
 Nothing leaves your machine unless you point the LLM settings elsewhere or connect Google Calendar. The model URL in Config is `http://localhost:11434` (Ollama) by default. With the calendar connected, timed tasks (their text, time and a link to the note) are sent to Google Calendar, and your events for the next days are read back for Home. The Google sign-in is stored in `Tracker/AI/` inside your vault.
 

@@ -190,3 +190,13 @@
 .pt-event-title a { color: var(--text-normal); text-decoration: none; }
 .pt-anytime-head { margin-top: 6px; }
 .pt-cal-note .pt-mini { margin-left: 4px; }
+
+/* Model job progress (a pinned notice) */
+.notice.pt-progress { min-width: 260px; max-width: 340px; }
+.pt-progress-head { display: flex; justify-content: space-between; gap: 8px; }
+.pt-progress-count { font-variant-numeric: tabular-nums; opacity: 0.8; }
+.pt-progress-label { margin: 4px 0; opacity: 0.85; font-size: 0.9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pt-progress-bar { height: 4px; border-radius: 2px; background: var(--background-modifier-border); overflow: hidden; }
+.pt-progress-bar > div { height: 100%; background: var(--interactive-accent); transition: width 0.4s; }
+.pt-progress-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; font-size: 0.85em; font-variant-numeric: tabular-nums; }
+.pt-progress-stop { padding: 2px 10px; font-size: 0.9em; }

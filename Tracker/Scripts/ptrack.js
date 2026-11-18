@@ -872,7 +872,47 @@ function llmBase(env, cfg) {
   if (!url) throw new Error("llm_url_mobile is empty in Tracker/Config");
   return String(url).replace(/\/+$/, "");
 }
+/* Progress of model jobs: a pinned panel (step, current item, bar, elapsed / left, Stop). Every model call goes
+   through llmChat, which gives up waiting as soon as Stop is pressed (the answer, if it still comes, is ignored). */
+class Stopped extends Error { constructor() { super("stopped"); } }
+const fmtSecs = (s) => (s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
+/** Text of the panel (also used without a panel, and in tests). */
+function jobText(job, now = Date.now()) {
+  const el = (now - job.t0) / 1000;
+  const doneN = Math.max(0, job.i - 1);
+  const per = doneN ? (job.tDone - job.t0) / 1000 / doneN : null;
+  const left = per && job.total > 1 ? Math.max(0, per * (job.total - doneN) - (now - job.tDone) / 1000) : null;
+  return {
+    title: job.title,
+    count: job.total > 1 ? `${Math.min(job.i, job.total)}/${job.total}` : "",
+    label: job.label,
+    time: `⏱ ${fmtSecs(el)}${left !== null ? ` · about ${fmtSecs(left)} left` : ""}`,
+    pct: job.total ? Math.round((100 * doneN) / job.total) : 0,
+  };
+}
+function startJob(env, title, total = 1) {
+  const job = { title, total, i: 0, label: "", t0: Date.now(), tDone: Date.now(), stopped: false, waiters: [], prev: env.job };
+  const ui = env.progressUI ? env.progressUI(job) : null;
+  job.step = (i, label) => {
+    if (i > job.i && job.i > 0) job.tDone = Date.now();
+    job.i = i; job.label = String(label || "").slice(0, 80);
+    if (ui) ui.update(); else env.notice(`${title}${total > 1 ? ` ${i}/${total}` : ""}: ${job.label}`, 2500);
+  };
+  job.stop = () => { if (job.stopped) return; job.stopped = true; job.waiters.splice(0).forEach((f) => f()); };
+  job.wait = (p) => {
+    p.catch(() => {}); // an answer that arrives after Stop is dropped quietly
+    if (job.stopped) return Promise.reject(new Stopped());
+    return Promise.race([p, new Promise((_, rej) => job.waiters.push(() => rej(new Stopped())))]);
+  };
+  job.end = () => { if (ui) ui.close(); env.job = job.prev; };
+  env.job = job;
+  return job;
+}
 async function llmChat(env, cfg, messages, schema) {
+  const call = llmChatRaw(env, cfg, messages, schema);
+  return env.job ? env.job.wait(call) : call;
+}
+async function llmChatRaw(env, cfg, messages, schema) {
   const prov = String((env.isMobile && cfg.llm_provider_mobile) || cfg.llm_provider).toLowerCase();
   const model = (env.isMobile && cfg.llm_model_mobile) || cfg.llm_model;
   const base = llmBase(env, cfg);
@@ -1026,6 +1066,26 @@ function makeEnv(app, tp) {
       if (obs && obs.requestUrl) { const r = await obs.requestUrl({ ...opts, throw: false }); return { status: r.status, text: r.text }; }
       const r = await fetch(opts.url, { method: opts.method, headers: Object.assign({ "Content-Type": opts.contentType }, opts.headers || {}), body: opts.body });
       return { status: r.status, text: await r.text() };
+    },
+    progressUI: (job) => {
+      if (!obs || !obs.Notice) return null;
+      let n;
+      try { n = new obs.Notice("", 0); } catch (e) { return null; }
+      const el = n.noticeEl || (n.messageEl && n.messageEl.parentElement);
+      if (!el) return null;
+      el.classList.add("pt-progress");
+      el.innerHTML = `<div class="pt-progress-head"><b class="pt-progress-title"></b><span class="pt-progress-count"></span></div><div class="pt-progress-label"></div><div class="pt-progress-bar"><div></div></div><div class="pt-progress-foot"><span class="pt-progress-time"></span><button class="pt-progress-stop">Stop</button></div>`;
+      const $ = (c) => el.querySelector(c);
+      const draw = () => {
+        const t = jobText(job);
+        $(".pt-progress-title").textContent = t.title; $(".pt-progress-count").textContent = t.count;
+        $(".pt-progress-label").textContent = t.label; $(".pt-progress-time").textContent = job.stopped ? "Stopping…" : t.time;
+        $(".pt-progress-bar > div").style.width = `${t.pct}%`;
+      };
+      $(".pt-progress-stop").addEventListener("click", (ev) => { ev.stopPropagation(); job.stop(); draw(); });
+      draw();
+      const timer = setInterval(draw, 1000);
+      return { update: draw, close: () => { clearInterval(timer); try { n.hide(); } catch (e) { /* gone */ } } };
     },
     open: async (path) => { const f = app.vault.getAbstractFileByPath(path); if (f) await app.workspace.getLeaf(false).openFile(f); },
     openUrl: (url) => {
@@ -1225,6 +1285,9 @@ async function descAction(env, act, path) {
   const { app } = env, cfg = getConfig(app);
   const store = await loadDescStore(app);
   let msg = "";
+  const name = (descProjects(app, cfg).find((p) => p.path === path) || {}).name || "";
+  const job = ["check", "generate"].includes(act) ? startJob(env, act === "check" ? "🤖 Rating the description" : "✨ Writing a description", 1) : act.endsWith("check-all") ? startJob(env, "🤖 Checking descriptions", 0) : null;
+  if (job && job.total === 1) job.step(1, name);
   try {
     if (act === "check") { const r = await checkDescription(env, path, store); msg = r.verdict === "missing" ? "No description to check — try ✨ Write one." : `Description: ${r.score}/100 (${r.verdict})`; }
     else if (act === "generate") { await generateDescription(env, path, store); msg = "✨ Description written — use it or dismiss it."; }
@@ -1234,14 +1297,18 @@ async function descAction(env, act, path) {
       const todo = descProjects(app, cfg).filter((p) => liveStatus(p) && (act === "recheck-all" || !store[p.path] || store[p.path].hash !== descHash(p) || !store[p.path].verdict));
       if (!todo.length) msg = "All descriptions are already checked.";
       let i = 0;
+      job.total = todo.length;
       for (const p of todo) {
-        env.notice(`Checking ${++i}/${todo.length}: ${p.name}`, 2500);
+        job.step(++i, p.name);
         await checkDescription(env, p.path, store);
         await saveDescStore(app, store); // keep what's done if a later one fails
       }
       if (todo.length) { const w = todo.filter((p) => store[p.path].verdict !== "good").length; msg = `Checked ${todo.length} description(s)${w ? ` · ${w} could be better` : " · all good"}`; }
     } else throw new Error(`unknown action ${act}`);
-  } finally { await saveDescStore(app, store); }
+  } catch (e) {
+    if (!(e instanceof Stopped)) throw e;
+    msg = act.endsWith("check-all") ? `Stopped — ${Math.max(0, job.i - 1)} of ${job.total} checked; the rest keep their old rating.` : "Stopped — nothing changed.";
+  } finally { if (job) job.end(); await saveDescStore(app, store); }
   return msg;
 }
 
@@ -1534,16 +1601,22 @@ async function classifyInbox(env, cfg, { noModel = false } = {}) {
   if (!noModel && viaShortcut) await startShortcut(env, cfg, g, cat);
   if (!noModel) { try { llmBase(env, cfg); } catch (e) { env.notice(`${e.message} — listing the items without sorting them.`, 9000); noModel = true; } }
   const answers = [];
-  for (const [k, j] of g.jobs.entries()) {
-    if (noModel) { answers.push(null); continue; }
-    env.notice(j.type === "item" ? `Classifying ${k + 1}/${g.jobs.length}: ${j.text.slice(0, 40)}` : `Reading your notes (${k + 1}/${g.jobs.length})…`, 2500);
-    try {
-      answers.push(extractJson(await llmChat(env, cfg, j.type === "item" ? itemMessages(cat, j.text, today, cfg) : notesMessages(cat, j.text, today, cfg), j.type === "item" ? ITEM_SCHEMA(cat) : NOTES_SCHEMA(cat))));
-    } catch (e) {
-      if (/can't reach/.test(e.message)) { env.notice(`${e.message} — listing the rest without sorting.`, 9000); noModel = true; }
-      answers.push(null);
+  let stopped = 0;
+  const job = noModel ? null : startJob(env, "🤖 Sorting the inbox", g.jobs.length);
+  try {
+    for (const [k, j] of g.jobs.entries()) {
+      if (noModel) { answers.push(null); if (job && job.stopped) stopped++; continue; }
+      job.step(k + 1, j.type === "item" ? j.text : "your notes (free text)");
+      try {
+        answers.push(extractJson(await llmChat(env, cfg, j.type === "item" ? itemMessages(cat, j.text, today, cfg) : notesMessages(cat, j.text, today, cfg), j.type === "item" ? ITEM_SCHEMA(cat) : NOTES_SCHEMA(cat))));
+      } catch (e) {
+        if (e instanceof Stopped) { noModel = true; stopped++; }
+        else if (/can't reach/.test(e.message)) { env.notice(`${e.message} — listing the rest without sorting.`, 9000); noModel = true; }
+        answers.push(null);
+      }
     }
-  }
+  } finally { if (job) job.end(); }
+  if (stopped) env.notice(`Stopped — ${stopped} item(s) are listed in the Classified inbox without a destination.`, 8000);
   const records = jobRecords(g.jobs, answers, cat, cfg, today);
   await writeReview(app, cfg, records, g.sources, env.moment().format("YYYY-MM-DD HH:mm"));
   const open = records.filter((r) => r.kind !== "spending" && !r.dest && !r.newTopic).length;
@@ -1576,11 +1649,11 @@ function resolveDest(app, cfg, rec, projects) {
   const f = app.metadataCache.getFirstLinkpathDest(target, REVIEW_PATH) || app.vault.getAbstractFileByPath(/\.md$/.test(target) ? target : `${target}.md`);
   const pp = f ? f.path : resolveProject(app, v, REVIEW_PATH, projects);
   if (pp) { const p = projects.find((x) => x.path === pp); return p ? { type: "project", path: p.path, name: p.name } : { type: "note", path: pp, name: pp.split("/").pop().replace(/\.md$/, "") }; }
-  if (rec.kind !== "reference") return null; // a task or idea with a name that doesn't exist: ask
+  if (rec.kind !== "reference") { rec.wanted = sanitizeName(target.split("/").pop()); return null; } // a task or idea with a name that doesn't exist: ask (＋ New project offers that name)
   const name = sanitizeName(target.split("/").pop());
   return name ? { type: "newref", path: `${String(cfg.reference_folder || "References").replace(/\/+$/, "")}/${name}.md`, name } : null;
 }
-const destText = (d) => (!d ? "no destination" : d.type === "project" ? `→ ${d.name}` : d.type === "newref" ? `→ ${d.name} (new reference note)` : d.type === "finance" ? `→ ${d.name}` : d.type === "leave" ? "⏸ stays in the inbox" : d.type === "delete" ? "🗑 deleted" : `→ ${d.name}`);
+const destText = (d) => (!d ? "no destination" : d.type === "project" ? `→ ${d.name}` : d.type === "newproject" ? `→ ${d.name} (new project)` : d.type === "newref" ? `→ ${d.name} (new reference note)` : d.type === "finance" ? `→ ${d.name}` : d.type === "leave" ? "⏸ stays in the inbox" : d.type === "delete" ? "🗑 deleted" : `→ ${d.name}`);
 const cleanRec = (body) => ["to", "check", "new", "kind", "conf"].reduce((l, k) => setField(l, k, null), body).replace(/\s{2,}/g, " ").trim();
 /** The lines a record becomes at its destination. */
 function filedLines(cfg, rec, dest, today) {
@@ -1596,11 +1669,14 @@ function filedLines(cfg, rec, dest, today) {
 async function askDestinations(env, cfg, pending, projects, refs) {
   const live = projects.filter((p) => !p.routine && liveStatus(p)).sort((a, b) => projPrioRank(a) - projPrioRank(b) || a.name.localeCompare(b.name));
   const BACK = "__back";
+  const newProjects = [];
+  for (const r of pending) if (r.dest && r.dest.type === "newproject" && !newProjects.some((x) => x.dest === r.dest)) newProjects.push({ name: r.dest.name, isNew: true, dest: r.dest });
   let i = 0;
   while (i < pending.length) {
     const r = pending[i];
-    const head = `(${i + 1}/${pending.length}) ${KIND_ICON[r.kind]} “${stripFields(splitMeta(cleanRec(r.body)).head).slice(0, 70)}”${r.dest ? ` — now ${destText(r.dest)}` : ""} · Esc cancels, nothing is applied yet`;
-    const top = r.kind === "reference" ? [["📚 Reference note…", "ref"], ["＋ New reference note…", "newref"], ["→ Project…", "project"]] : [["→ Project…", "project"], ["📚 Reference note…", "ref"], ["＋ New reference note…", "newref"]];
+    const head = `(${i + 1}/${pending.length}) ${KIND_ICON[r.kind]} “${stripFields(splitMeta(cleanRec(r.body)).head).slice(0, 70)}”${r.dest ? ` — now ${destText(r.dest)}` : r.wanted ? ` — “${r.wanted}” isn't a project yet` : ""} · Esc cancels, nothing is applied yet`;
+    const newProj = [r.wanted && !r.dest ? `＋ New project “${r.wanted}”…` : "＋ New project…", "newproject"];
+    const top = r.kind === "reference" ? [["📚 Reference note…", "ref"], ["＋ New reference note…", "newref"], ["→ Project…", "project"], newProj] : [["→ Project…", "project"], newProj, ["📚 Reference note…", "ref"], ["＋ New reference note…", "newref"]];
     top.push([`✎ Change type (now ${KIND_NAME[r.kind]})…`, "kind"], ["⏸ Leave in the inbox", "leave"], ["🗑 Delete", "delete"]);
     if (i > 0) top.push(["← Back to the previous item", "prev"]);
     const c = await ask(env, top.map((o) => o[0]), top.map((o) => o[1]), head);
@@ -1613,9 +1689,27 @@ async function askDestinations(env, cfg, pending, projects, refs) {
       continue; // same item again, with the new type
     }
     if (c === "project") {
-      const p = await env.suggest([...live.map((x) => `${x.name}${x.status !== "active" ? ` (${x.status})` : ""}`), "← Back"], [...live, BACK], `${KIND_ICON[r.kind]} To which project?`);
+      const choices = [...newProjects, ...live];
+      const p = await env.suggest([...choices.map((x) => `${x.name}${x.isNew ? " (new — created when you apply)" : x.status !== "active" ? ` (${x.status})` : ""}`), "← Back"], [...choices, BACK], `${KIND_ICON[r.kind]} To which project?`);
       if (!p || p === BACK) continue;
-      r.dest = { type: "project", path: p.path, name: p.name };
+      r.dest = p.isNew ? p.dest : { type: "project", path: p.path, name: p.name };
+    } else if (c === "newproject") {
+      // nothing is created yet: the project note is made when you apply, with everything filed into it
+      const name = sanitizeName(oneLine(await env.prompt("＋ New project — name (empty = back)", r.wanted || "")));
+      if (!name) continue;
+      const ex = projects.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      if (ex) { r.dest = { type: "project", path: ex.path, name: ex.name }; env.notice(`“${ex.name}” already exists — filed there.`, 4000); i++; continue; }
+      const again = newProjects.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      if (again) { r.dest = again.dest; i++; continue; }
+      const roots = cfg.project_roots.filter((x) => env.app.vault.getAbstractFileByPath(x));
+      if (!roots.length) { env.notice("No project folders set up yet — run Register projects first.", 6000); continue; }
+      const root = roots.length > 1 ? await env.suggest([...roots, "← Back"], [...roots, BACK], `Folder for “${name}”?`) : roots[0];
+      if (!root || root === BACK) continue;
+      const description = await env.prompt(`“${name}”: one line — what is it about? (optional; Esc = back)`, "");
+      if (description === null || description === undefined) continue;
+      const dest = { type: "newproject", path: `${root}/${name}/${name}.md`, name, root, description: oneLine(description) };
+      newProjects.push({ name, isNew: true, dest });
+      r.dest = dest;
     } else if (c === "ref") {
       if (!refs.length) { env.notice(`No reference notes in ${cfg.reference_folder} yet — use ＋ New reference note.`, 5000); continue; }
       const n = await env.suggest([...refs.map((x) => x.name), "← Back"], [...refs, BACK], "📚 To which reference note?");
@@ -1700,7 +1794,7 @@ async function cmdApplyInbox(env) {
   // last check, with a way back to the questions
   for (;;) {
     const by = (t) => recs.filter((r) => r.dest && r.dest.type === t).length;
-    const sum = [[by("project"), "to projects"], [by("note") + by("newref"), "to reference notes"], [by("finance"), "spendings"], [by("leave"), "left in the inbox"], [by("delete"), "deleted"]].filter(([n]) => n).map(([n, l]) => `${n} ${l}`).join(" · ");
+    const sum = [[by("project") + by("newproject"), "to projects"], [by("note") + by("newref"), "to reference notes"], [by("finance"), "spendings"], [by("leave"), "left in the inbox"], [by("delete"), "deleted"]].filter(([n]) => n).map(([n, l]) => `${n} ${l}`).join(" · ");
     const opts = [["✔ Apply", "apply"]];
     if (pending.length) opts.push(["← Back to the questions", "back"]);
     opts.push(["✖ Cancel — change nothing", "cancel"]);
@@ -1719,10 +1813,11 @@ async function cmdApplyInbox(env) {
     if (d.type === "leave") { const clean = cleanRec(r.body); leftover.push(/^\[.\]/.test(clean) ? `- ${clean}` : `- [ ] ${clean}`, ...r.sub.map((l) => `\t${l}`)); continue; }
     const lines = filedLines(cfg, r, d, today);
     if (d.type === "finance") { spend.push(...lines); continue; }
-    if (d.type === "project") add(d, r.kind === "task" ? (parseFields(r.body).week ? PLANNED_SEC : "Backlog") : "Notes & ideas", lines);
+    if (d.type === "project" || d.type === "newproject") add(d, r.kind === "task" ? (parseFields(r.body).week ? PLANNED_SEC : "Backlog") : "Notes & ideas", lines);
     else add(d, "", lines);
   }
   for (const { d, secs } of groups.values()) {
+    if (d.type === "newproject" && !app.vault.getAbstractFileByPath(d.path)) await createFile(app, d.path, projectNote({ name: d.name, scope: d.root.split("/").pop().toLowerCase(), status: "active", description: d.description, objective: "", today }));
     if (d.type === "newref" && !app.vault.getAbstractFileByPath(d.path)) await createFile(app, d.path, `---\ntype: reference\ndescription: ""\n---\n# ${d.name}\n`);
     await editLines(app, d.path, (ls) => { for (const [sec, lines] of secs) { if (sec) insertIntoProjectSection(ls, sec, lines); else appendLines(ls, lines); } });
   }
@@ -1741,7 +1836,8 @@ async function cmdApplyInbox(env) {
   await writeFile(app, REVIEW_PATH, EMPTY_REVIEW);
   await aiRemove(app, REVIEW_SNAP);
   const by = (t) => recs.filter((r) => r.dest.type === t).length;
-  env.notice(`Inbox applied: ${by("project")} to projects · ${by("note") + by("newref")} to reference notes${fin ? ` · ${spend.filter((l) => !/^\t/.test(l)).length} spending(s) → “Process ${fin.count} new spending(s)” task` : ""}${by("leave") ? ` · ${by("leave")} left in the inbox` : ""}${missed ? ` · ${missed} inbox line(s) changed after classifying were left in place` : ""}`, 9000);
+  const made = [...new Set(recs.filter((r) => r.dest.type === "newproject").map((r) => r.dest.name))];
+  env.notice(`Inbox applied: ${by("project") + by("newproject")} to projects${made.length ? ` (new: ${made.join(", ")})` : ""} · ${by("note") + by("newref")} to reference notes${fin ? ` · ${spend.filter((l) => !/^\t/.test(l)).length} spending(s) → “Process ${fin.count} new spending(s)” task` : ""}${by("leave") ? ` · ${by("leave")} left in the inbox` : ""}${missed ? ` · ${missed} inbox line(s) changed after classifying were left in place` : ""}`, 9000);
 }
 
 /** Process inbox: classify into the Classified inbox (or, when one is waiting, apply / open / redo it). */
@@ -1913,8 +2009,11 @@ async function projectAction(env, act, path, i) {
   const today = env.moment().format("YYYY-MM-DD");
   let msg = "";
   if (act === "analyze") {
-    env.notice("Analyzing the project's tasks…", 3000);
-    store[path] = await analyzeProject(env, path);
+    const job = startJob(env, "🔍 Analyzing tasks vs goals", 1);
+    job.step(1, (getConfig(app) && (listProjects(app, cfg).find((x) => x.path === path) || {}).name) || "");
+    try { store[path] = await analyzeProject(env, path); }
+    catch (e) { if (e instanceof Stopped) return "Stopped — the previous review is kept."; throw e; }
+    finally { job.end(); }
     const r = store[path];
     msg = `Project review: ${r.missing.length} missing task(s), ${r.duplicates.length} duplicate group(s)`;
   } else {
@@ -2794,7 +2893,10 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
       const w = (await loadAll(app)).weekMap.get(id);
       const facts = w.goals.map((g) => `- ${g.projectName}: "${g.text}" → ${g.score}%${g.fields.miss ? ` (reason: ${g.fields.miss})` : ""}; tasks done ${g.doneCount}/${g.counted.length}${g.cancelled.length ? `, ${g.cancelled.length} cancelled` : ""}`).join("\n");
       const msg = `Here is my week ${id}:\n${facts}${rLine ? `\nRoutines: ${rLine}` : ""}\nWins: ${wins || "-"}\nObstacles: ${lessons || "-"}\nEnergy (1-5): ${energy || "-"}\n\nWrite 2–3 plain sentences: what the week was really about, the pattern behind what slipped, and one concrete adjustment for next week. Be direct, no praise, no bullet points.`;
-      const sm = oneLine(await llmChat(env, cfg, [{ role: "user", content: msg }]));
+      const job = startJob(env, "🤖 Writing the week's summary", 1);
+      job.step(1, id);
+      let sm = "";
+      try { sm = oneLine(await llmChat(env, cfg, [{ role: "user", content: msg }])); } finally { job.end(); }
       if (sm) fields.push(`- Summary:: ${sm}`);
     } catch (e) { env.notice(`AI summary skipped — ${e.message}`, 8000); }
   }
@@ -3890,7 +3992,7 @@ module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
   getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
-  cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  startJob, jobText, Stopped, cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   normPriority, migratePriorities, weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };
