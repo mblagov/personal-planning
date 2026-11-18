@@ -211,3 +211,7 @@
 .pt-filter { flex: 1; min-width: 180px; }
 .pt-nav { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px; font-size: var(--font-ui-small); }
 .pt-nav-up { display: inline-block; margin-bottom: 8px; font-size: var(--font-ui-small); }
+.notice.pt-progress { max-width: 420px; }
+.pt-progress-out { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 0.78em; line-height: 1.35; padding: 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.18); user-select: text; cursor: text; }
+.pt-progress-results { margin-top: 4px; font-size: 0.8em; opacity: 0.85; }
+.pt-progress-results > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

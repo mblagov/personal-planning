@@ -267,12 +267,18 @@ The sign-in is stored in `Tracker/AI/google-calendar-token.json` and syncs with 
 
 ## 12. Watching the model work
 
-Every job of the local model — sorting the inbox, checking or writing descriptions, analyzing a project, the review summary — shows a **progress panel** in the corner: what it's doing, *3/12* and the item it's on, a bar, the time so far and roughly how long is left. **Stop** ends it right away (an answer that still arrives is ignored):
+Every job of the local model — sorting the inbox, checking or writing descriptions, analyzing a project, the review summary — shows a **progress panel** in the corner: what it's doing, *3/12* and the item it's on, a bar, the time so far and roughly how long is left. Below it you see **the model's answer as it writes it** (on the Mac; on the iPhone each answer appears when it's complete), including the reasoning of a thinking model if `llm_think` is on, and one line per finished item: what was decided (*✓ Renew car insurance → task · Car*) and how long the request took (*prompt 3.1k tok 12s · answer 85 tok 3s*). **Stop** ends it right away (an answer that still arrives is ignored):
 - inbox: what's sorted so far goes to the Classified inbox; the rest is listed there without a destination;
 - *Check descriptions*: the ones already checked keep their new rating;
 - a single check, ✨ Write, Analyze, the summary: nothing changes.
 
 Obsidian stays usable while the model works, and you can keep editing. The model's results are written only at the end (the Classified inbox, a description proposal, the project review); nothing is filed into your notes until you apply it. Clicking the panel hides it — the job carries on.
+
+**Why is it slow?** The timing lines tell you:
+- *prompt … tok* large and slow: every request carries your whole project list (descriptions, keywords, `llm_examples_per_project` example tasks). Inbox items are sent in batches of `llm_batch` (6) so the list is read once per batch, not once per item. Shorter descriptions and fewer examples make it faster still.
+- *answer* slow with a 💭 in the panel: a thinking model is reasoning first. Keep `llm_think: false`.
+- *loading the model*: the model was unloaded; `llm_keep_alive` (30m) keeps it in memory.
+- Everything slow: the model is too big for the Mac's memory (it swaps). A 7–8B model (e.g. `qwen2.5:7b-instruct`) is plenty for sorting; check `ollama ps` shows *100% GPU*.
 
 ## 13. If something doesn't work
 

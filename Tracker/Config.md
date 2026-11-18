@@ -31,6 +31,10 @@ finance_file: Finance/Spendings.md
 finance_project: ""
 currency: EUR
 llm_examples_per_project: 3
+llm_batch: 6
+llm_context: 8192
+llm_keep_alive: 30m
+llm_think: false
 calendar_client_id: ""
 calendar_client_secret: ""
 calendar_id: primary
@@ -69,7 +73,11 @@ Edit the values in the properties above. This note syncs, so both your Mac and y
 | `finance_file` | Spendings from the inbox are collected in this note under *Unprocessed*, with one *Process N new spending(s)* task. |
 | `finance_project` | A project for that task (e.g. `"[[Finance]]"`). Empty = the task sits in the finance note itself. |
 | `currency` | Currency for spendings that don't name one, e.g. `EUR`. |
-| `llm_examples_per_project` | How many recent tasks per project the model sees as examples. |
+| `llm_examples_per_project` | How many recent tasks per project the model sees as examples. Fewer = a shorter prompt = faster. |
+| `llm_batch` | How many inbox items are sorted in one request. Every request carries your whole project list, so sorting 6 at a time reads it 6× less often. `1` = one at a time (slowest, sometimes slightly more careful). |
+| `llm_context` | Ollama only: the context window in tokens. The project list, the rules and the items must fit, or the start gets cut off. 8192 is plenty for ~40 projects; larger needs more memory. |
+| `llm_keep_alive` | Ollama only: how long the model stays loaded after a request (`30m`). Loading it again takes seconds to a minute. |
+| `llm_think` | `false`: thinking models (qwen3, deepseek-r1, gpt-oss…) answer without writing their reasoning first — usually many times faster, and enough for sorting. `true` lets them think. |
 | `calendar_client_id`, `calendar_client_secret` | Your Google OAuth client for the calendar sync (type *Desktop app*). Empty = no calendar. See *Start here → Google Calendar*. |
 | `calendar_id` | The calendar timed tasks go to: `primary` (your main calendar) or a calendar's id from Google Calendar → Settings → *Integrate calendar*. A separate “Tasks” calendar keeps them apart. |
 | `calendar_show` | More calendars whose events are shown on Home (ids, comma-separated), e.g. a family calendar. |

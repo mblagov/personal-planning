@@ -198,9 +198,13 @@ All settings are in the frontmatter of [Tracker/Config.md](Tracker/Config.md). T
 
 ## Privacy
 
-While the local model works, a progress panel shows the step, the current item and the time left, with a **Stop** button.
+While the local model works, a progress panel shows the step, the current item, the time left and the model's answer as it's written, with a **Stop** button. Inbox items are sorted several per request (`llm_batch`).
 
 Nothing leaves your machine unless you point the LLM settings elsewhere or connect Google Calendar. The model URL in Config is `http://localhost:11434` (Ollama) by default. With the calendar connected, timed tasks (their text, time and a link to the note) are sent to Google Calendar, and your events for the next days are read back for Home. The Google sign-in is stored in `Tracker/AI/` inside your vault.
+
+## Tests
+
+`tests/run.sh` runs the tests with macOS's built-in JavaScriptCore against the sample vault (no Node needed; it looks for a `moment.min.js` on the Mac, or set `MOMENT=`).
 
 ## License
 

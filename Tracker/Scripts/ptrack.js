@@ -31,6 +31,10 @@ const DEFAULTS = {
   finance_project: "",          // project for the "Process new spendings" task; empty = in the finance file
   currency: "",                 // currency for spendings that don't say, e.g. EUR
   llm_examples_per_project: 3,
+  llm_batch: 6,                 // inbox items sorted per request (the project list is read once per request); 1 = one at a time
+  llm_context: 8192,            // Ollama: context window in tokens — the project list must fit
+  llm_keep_alive: "30m",        // Ollama: keep the model loaded between requests
+  llm_think: false,             // thinking models (qwen3, deepseek-r1…): false = answer without the long reasoning (much faster)
   llm_mobile: "off",            // iPhone: off | shortcut (Apple on-device model via Shortcuts) | url
   llm_shortcut: "Tracker Classify",
   llm_url_mobile: "",
@@ -113,7 +117,7 @@ function getConfig(app) {
   for (const k of Object.keys(DEFAULTS)) if (fm[k] !== undefined && fm[k] !== null && fm[k] !== "") cfg[k] = fm[k];
   cfg.project_roots = toArr(cfg.project_roots).map((r) => r.replace(/\/+$/, ""));
   cfg.weeks_folder = String(cfg.weeks_folder).replace(/\/+$/, "");
-  for (const k of ["goals_min", "goals_max", "focus_priority", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project", "calendar_default_minutes", "calendar_sync_minutes"]) cfg[k] = Number(cfg[k]);
+  for (const k of ["goals_min", "goals_max", "focus_priority", "plan_next_week_from", "upcoming_days", "llm_flag_below", "llm_examples_per_project", "llm_batch", "llm_context", "calendar_default_minutes", "calendar_sync_minutes"]) cfg[k] = Number(cfg[k]);
   return cfg;
 }
 
@@ -902,14 +906,18 @@ function jobText(job, now = Date.now()) {
   };
 }
 function startJob(env, title, total = 1) {
-  const job = { title, total, i: 0, label: "", t0: Date.now(), tDone: Date.now(), stopped: false, waiters: [], prev: env.job };
+  const job = { title, total, i: 0, label: "", t0: Date.now(), tDone: Date.now(), stopped: false, waiters: [], aborts: [], prev: env.job, output: "", results: [] };
   const ui = env.progressUI ? env.progressUI(job) : null;
   job.step = (i, label) => {
     if (i > job.i && job.i > 0) job.tDone = Date.now();
-    job.i = i; job.label = String(label || "").slice(0, 80);
+    job.i = i; job.label = String(label || "").slice(0, 80); job.output = "";
     if (ui) ui.update(); else env.notice(`${title}${total > 1 ? ` ${i}/${total}` : ""}: ${job.label}`, 2500);
   };
-  job.stop = () => { if (job.stopped) return; job.stopped = true; job.waiters.splice(0).forEach((f) => f()); };
+  job.stop = () => { if (job.stopped) return; job.stopped = true; job.waiters.splice(0).forEach((f) => f()); job.aborts.splice(0).forEach((f) => { try { f(); } catch (e) { /* gone */ } }); };
+  /** The model's text so far for the current item (streamed on the Mac, all at once elsewhere). */
+  job.out = (text) => { job.output = String(text || ""); if (ui && ui.output) ui.output(); };
+  /** One line per finished item: what the model decided. */
+  job.result = (line) => { job.results.push(String(line).slice(0, 120)); if (job.results.length > 50) job.results.shift(); if (ui && ui.output) ui.output(); };
   job.wait = (p) => {
     p.catch(() => {}); // an answer that arrives after Stop is dropped quietly
     if (job.stopped) return Promise.reject(new Stopped());
@@ -930,25 +938,90 @@ async function llmChatRaw(env, cfg, messages, schema) {
   const ollama = prov === "ollama";
   const url = ollama ? `${base}/api/chat` : base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
   const body = ollama
-    ? { model, messages, stream: false, options: { temperature: 0 } }
+    ? { model, messages, stream: false, keep_alive: cfg.llm_keep_alive || "30m", options: { temperature: 0, num_ctx: Number(cfg.llm_context) || 8192 } }
     : { model, messages, temperature: 0 };
+  if (ollama && !cfg.llm_think) body.think = false; // thinking models: skip the long reasoning before the answer
   if (schema) {
     if (ollama) body.format = schema;
     else body.response_format = { type: "json_schema", json_schema: { name: "result", strict: true, schema } };
   }
+  const job = env.job, streaming = !!(job && env.streamPost);
+  const t0 = Date.now();
   const send = async () => {
-    try { return await env.request({ url, method: "POST", contentType: "application/json", body: JSON.stringify(body) }); }
+    try {
+      if (streaming) {
+        body.stream = true;
+        const st = { buf: "", content: "", thinking: "", stats: null };
+        const r = await env.streamPost(url, JSON.stringify(body), (chunk) => { if (feedStream(st, chunk, ollama)) job.out(showStream(st)); }, (abort) => job.aborts.push(abort));
+        if (r.status < 400) { feedStream(st, "\n", ollama); return { status: r.status, text: null, content: st.content, stats: st.stats }; }
+        return r;
+      }
+      return await env.request({ url, method: "POST", contentType: "application/json", body: JSON.stringify(body) });
+    }
     catch (e) { throw new Error(`can't reach the local model at ${base} (${e.message || e}). ${env.isMobile ? "Is the model app running?" : `Is ${ollama ? "Ollama" : "the server"} running?`}`); }
   };
   let r = await send();
+  if (r.status >= 400 && body.think === false) { delete body.think; r = await send(); } // older Ollama: no "think" option
   if (r.status >= 400 && schema) { // older servers: fall back to plain JSON mode
     if (ollama) body.format = "json"; else delete body.response_format;
     r = await send();
   }
   if (r.status >= 400) throw new Error(`local model returned HTTP ${r.status}: ${String(r.text).slice(0, 200)}`);
-  const data = JSON.parse(r.text);
-  return stripThink(ollama ? data.message?.content : data.choices?.[0]?.message?.content);
+  let text, stats = r.stats || null;
+  if (r.content !== undefined) text = r.content;
+  else {
+    const data = JSON.parse(r.text);
+    text = ollama ? data.message?.content : data.choices?.[0]?.message?.content;
+    stats = llmStats(data);
+    if (job) job.out(text);
+  }
+  if (job) job.stats = Object.assign({ wall: (Date.now() - t0) / 1000 }, stats || {});
+  return stripThink(text);
 }
+/** Token counts and timings from the server's answer (Ollama reports both; OpenAI-style servers only tokens). */
+function llmStats(o) {
+  if (!o) return null;
+  if (o.prompt_eval_count !== undefined || o.eval_count !== undefined) {
+    const s = (ns) => (ns ? ns / 1e9 : 0);
+    return { promptTok: o.prompt_eval_count || 0, promptSec: s(o.prompt_eval_duration), outTok: o.eval_count || 0, outSec: s(o.eval_duration), loadSec: s(o.load_duration) };
+  }
+  if (o.usage) return { promptTok: o.usage.prompt_tokens || 0, outTok: o.usage.completion_tokens || 0 };
+  return null;
+}
+/** "prompt 3.1k tok 12s · answer 85 tok 3s · loading 4s" */
+function statsText(st) {
+  if (!st) return "";
+  const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  const sec = (x) => (x >= 10 ? `${Math.round(x)}s` : `${x.toFixed(1)}s`);
+  const bits = [];
+  if (st.promptTok !== undefined) bits.push(`prompt ${k(st.promptTok)} tok${st.promptSec ? ` ${sec(st.promptSec)}` : ""}`);
+  if (st.outTok !== undefined) bits.push(`answer ${k(st.outTok)} tok${st.outSec ? ` ${sec(st.outSec)}` : ""}`);
+  if (st.loadSec >= 1) bits.push(`loading the model ${sec(st.loadSec)}`);
+  if (!bits.length && st.wall) bits.push(sec(st.wall));
+  return bits.join(" · ");
+}
+/** Read streamed lines (Ollama: one JSON per line; OpenAI-style: "data: {…}"). Returns true if text was added. */
+function feedStream(st, chunk, ollama) {
+  st.buf += chunk;
+  const lines = st.buf.split("\n");
+  st.buf = lines.pop();
+  let added = false;
+  for (let l of lines) {
+    l = l.trim();
+    if (l.startsWith("data:")) l = l.slice(5).trim();
+    if (!l || l === "[DONE]") continue;
+    let o;
+    try { o = JSON.parse(l); } catch (e) { continue; }
+    const stats = llmStats(o.done || o.usage ? o : null);
+    if (stats) st.stats = stats;
+    const m = ollama ? o.message || {} : (o.choices && o.choices[0] && (o.choices[0].delta || o.choices[0].message)) || {};
+    if (m.content) { st.content += m.content; added = true; }
+    const th = m.thinking || m.reasoning_content || m.reasoning;
+    if (th) { st.thinking += th; added = true; }
+  }
+  return added;
+}
+const showStream = (st) => (st.thinking ? `💭 ${st.thinking}${st.content ? "\n\n" : ""}` : "") + st.content;
 
 async function projectCatalog(app, cfg) {
   const ps = listProjects(app, cfg).filter((p) => !["done", "archived", "dropped"].includes(p.status));
@@ -1078,6 +1151,24 @@ function makeEnv(app, tp) {
       const r = await fetch(opts.url, { method: opts.method, headers: Object.assign({ "Content-Type": opts.contentType }, opts.headers || {}), body: opts.body });
       return { status: r.status, text: await r.text() };
     },
+    // Desktop: stream the model's answer through Node's http (no CORS, can be cut off). Not on the iPhone.
+    streamPost: (() => {
+      const req = typeof require === "function" ? require : typeof window !== "undefined" && window.require;
+      if (!req || (obs && obs.Platform && obs.Platform.isMobile)) return null;
+      return (url, body, onData, onAbort) => new Promise((resolve, reject) => {
+        const u = new URL(url), mod = req(u.protocol === "https:" ? "https" : "http");
+        const rq = mod.request({ hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80), path: u.pathname + u.search, method: "POST", headers: { "Content-Type": "application/json" } }, (res) => {
+          let all = "";
+          res.setEncoding("utf8");
+          res.on("data", (c) => { if (res.statusCode >= 400) all += c; else onData(c); });
+          res.on("end", () => resolve({ status: res.statusCode, text: all }));
+          res.on("error", reject);
+        });
+        rq.on("error", reject);
+        if (onAbort) onAbort(() => rq.destroy(new Error("stopped")));
+        rq.end(body);
+      });
+    })(),
     progressUI: (job) => {
       if (!obs || !obs.Notice) return null;
       let n;
@@ -1085,7 +1176,7 @@ function makeEnv(app, tp) {
       const el = n.noticeEl || (n.messageEl && n.messageEl.parentElement);
       if (!el) return null;
       el.classList.add("pt-progress");
-      el.innerHTML = `<div class="pt-progress-head"><b class="pt-progress-title"></b><span class="pt-progress-count"></span></div><div class="pt-progress-label"></div><div class="pt-progress-bar"><div></div></div><div class="pt-progress-foot"><span class="pt-progress-time"></span><button class="pt-progress-stop">Stop</button></div>`;
+      el.innerHTML = `<div class="pt-progress-head"><b class="pt-progress-title"></b><span class="pt-progress-count"></span></div><div class="pt-progress-label"></div><div class="pt-progress-bar"><div></div></div><pre class="pt-progress-out"></pre><div class="pt-progress-results"></div><div class="pt-progress-foot"><span class="pt-progress-time"></span><button class="pt-progress-stop">Stop</button></div>`;
       const $ = (c) => el.querySelector(c);
       const draw = () => {
         const t = jobText(job);
@@ -1093,10 +1184,19 @@ function makeEnv(app, tp) {
         $(".pt-progress-label").textContent = t.label; $(".pt-progress-time").textContent = job.stopped ? "Stopping…" : t.time;
         $(".pt-progress-bar > div").style.width = `${t.pct}%`;
       };
+      const out = $(".pt-progress-out"), res = $(".pt-progress-results");
+      const showOut = () => {
+        out.textContent = job.output.length > 1500 ? "…" + job.output.slice(-1500) : job.output;
+        out.style.display = job.output ? "" : "none";
+        out.scrollTop = out.scrollHeight;
+        res.innerHTML = job.results.slice(-4).map((x) => `<div>${esc(x)}</div>`).join("");
+      };
+      showOut();
+      ["click", "mousedown", "pointerdown"].forEach((t) => [out, res].forEach((x) => x.addEventListener(t, (ev) => ev.stopPropagation()))); // reading the output doesn't hide the panel
       $(".pt-progress-stop").addEventListener("click", (ev) => { ev.stopPropagation(); job.stop(); draw(); });
       draw();
       const timer = setInterval(draw, 1000);
-      return { update: draw, close: () => { clearInterval(timer); try { n.hide(); } catch (e) { /* gone */ } } };
+      return { update: draw, output: showOut, close: () => { clearInterval(timer); try { n.hide(); } catch (e) { /* gone */ } } };
     },
     open: async (path) => { const f = app.vault.getAbstractFileByPath(path); if (f) await app.workspace.getLeaf(false).openFile(f); },
     openUrl: (url) => {
@@ -1312,6 +1412,7 @@ async function descAction(env, act, path) {
       for (const p of todo) {
         job.step(++i, p.name);
         await checkDescription(env, p.path, store);
+        if (store[p.path]) job.result(`✓ ${p.name}: ${store[p.path].score ?? "–"} (${store[p.path].verdict})`);
         await saveDescStore(app, store); // keep what's done if a later one fails
       }
       if (todo.length) { const w = todo.filter((p) => store[p.path].verdict !== "good").length; msg = `Checked ${todo.length} description(s)${w ? ` · ${w} could be better` : " · all good"}`; }
@@ -1400,6 +1501,19 @@ Item: "${item}"
 Answer with JSON like {"kind":"task","project":"P1","topic":"none","new_topic":"","amount":0,"currency":"","date":"","category":"","priority":"medium","confidence":0.8,"due":""}`;
   return [{ role: "system", content: INBOX_SYSTEM }, { role: "user", content: user }];
 }
+/** Several inbox items in one request: the project list and the rules are read once for all of them. */
+function batchMessages(cat, items, today, cfg) {
+  const user = `${inboxContext(cat, today)}
+
+Rules (for each item on its own):
+${inboxRules(cfg)}
+
+Items:
+${items.map((t, i) => `${i + 1}. "${t}"`).join("\n")}
+
+Answer with JSON like {"items":[{"n":1,"kind":"task","project":"P1","topic":"none","new_topic":"","amount":0,"currency":"","date":"","category":"","priority":"medium","confidence":0.8,"due":""}]} — one entry per item, "n" = the item's number, all ${items.length} items.`;
+  return [{ role: "system", content: INBOX_SYSTEM }, { role: "user", content: user }];
+}
 function notesMessages(cat, notes, today, cfg) {
   const user = `${inboxContext(cat, today)}
 
@@ -1428,6 +1542,7 @@ function itemProps(cat) {
 }
 const ITEM_KEYS = ["kind", "project", "topic", "new_topic", "amount", "currency", "date", "category", "priority", "confidence", "due"];
 const ITEM_SCHEMA = (cat) => ({ type: "object", properties: itemProps(cat), required: ITEM_KEYS, additionalProperties: false });
+const BATCH_SCHEMA = (cat) => ({ type: "object", properties: { items: { type: "array", items: { type: "object", properties: Object.assign({ n: { type: "integer" } }, itemProps(cat)), required: ["n", ...ITEM_KEYS], additionalProperties: false } } }, required: ["items"], additionalProperties: false });
 const NOTES_SCHEMA = (cat) => ({ type: "object", properties: { items: { type: "array", items: { type: "object", properties: Object.assign({ text: { type: "string" }, details: { type: "string" } }, itemProps(cat)), required: ["text", "details", ...ITEM_KEYS], additionalProperties: false } } }, required: ["items"], additionalProperties: false });
 
 /** Remove the indentation the lines have in common (sub-bullets of an item → top level). */
@@ -1601,6 +1716,14 @@ async function applyShortcutResults(env, cfg) {
 }
 
 /** Classify the whole inbox into the Classified inbox note. noModel: sort nothing, just list the items for you to place. Returns how many records. */
+/** "task · Sailing", "reference · Travel", "spending 86.4 EUR" — for the progress panel. */
+function answerText(a, cat) {
+  if (!a) return "?";
+  const name = (id, list) => ((list || []).find((x) => x.id === id) || {}).name;
+  if (a.kind === "spending") return `spending${a.amount ? ` ${a.amount}${a.currency ? " " + a.currency : ""}` : ""}`;
+  if (a.kind === "reference") return `reference · ${a.topic === "new" ? `new “${a.new_topic}”` : name(a.topic, cat.refs) || "no note"}`;
+  return `${a.kind || "task"} · ${name(a.project, cat.projects) || "no project"}${typeof a.confidence === "number" ? ` (${Math.round(a.confidence * 100)}%)` : ""}`;
+}
 async function classifyInbox(env, cfg, { noModel = false } = {}) {
   const { app } = env;
   const today = env.moment().format("YYYY-MM-DD");
@@ -1611,22 +1734,49 @@ async function classifyInbox(env, cfg, { noModel = false } = {}) {
   const viaShortcut = env.isMobile && String(cfg.llm_mobile).toLowerCase() === "shortcut";
   if (!noModel && viaShortcut) await startShortcut(env, cfg, g, cat);
   if (!noModel) { try { llmBase(env, cfg); } catch (e) { env.notice(`${e.message} — listing the items without sorting them.`, 9000); noModel = true; } }
-  const answers = [];
-  let stopped = 0;
+  const answers = new Array(g.jobs.length).fill(null);
+  let stopped = 0, modelSecs = 0, calls = 0;
   const job = noModel ? null : startJob(env, "🤖 Sorting the inbox", g.jobs.length);
+  // consecutive items go in batches (llm_batch per request); free-text notes are one request each
+  const units = [];
+  for (const [k, j] of g.jobs.entries()) {
+    const last = units[units.length - 1];
+    if (j.type === "item" && last && last.type === "item" && last.ks.length < Math.max(1, Number(cfg.llm_batch) || 1)) last.ks.push(k);
+    else units.push({ type: j.type, ks: [k] });
+  }
+  const ask1 = async (k) => {
+    const j = g.jobs[k];
+    const a = extractJson(await llmChat(env, cfg, j.type === "item" ? itemMessages(cat, j.text, today, cfg) : notesMessages(cat, j.text, today, cfg), j.type === "item" ? ITEM_SCHEMA(cat) : NOTES_SCHEMA(cat)));
+    answers[k] = a; calls++; modelSecs += (job.stats && job.stats.wall) || 0;
+    job.result(j.type === "item" ? `✓ ${j.text.slice(0, 40)} → ${answerText(a, cat)}` : `✓ notes → ${(a.items || []).map((x) => answerText(x, cat)).join(", ") || "nothing"}`);
+    if (job.stats) job.result(`   ${statsText(job.stats)}`);
+  };
   try {
-    for (const [k, j] of g.jobs.entries()) {
-      if (noModel) { answers.push(null); if (job && job.stopped) stopped++; continue; }
-      job.step(k + 1, j.type === "item" ? j.text : "your notes (free text)");
+    for (const u of units) {
+      if (noModel) { if (job && job.stopped) stopped += u.ks.length; continue; }
+      const k0 = u.ks[0], j0 = g.jobs[k0];
+      job.step(k0 + 1, u.type !== "item" ? "your notes (free text)" : u.ks.length > 1 ? `items ${k0 + 1}–${k0 + u.ks.length}: ${j0.text}` : j0.text);
       try {
-        answers.push(extractJson(await llmChat(env, cfg, j.type === "item" ? itemMessages(cat, j.text, today, cfg) : notesMessages(cat, j.text, today, cfg), j.type === "item" ? ITEM_SCHEMA(cat) : NOTES_SCHEMA(cat))));
+        if (u.ks.length === 1) await ask1(k0);
+        else {
+          const texts = u.ks.map((k) => g.jobs[k].text);
+          const a = extractJson(await llmChat(env, cfg, batchMessages(cat, texts, today, cfg), BATCH_SCHEMA(cat)));
+          calls++; modelSecs += (job.stats && job.stats.wall) || 0;
+          const got = Array.isArray(a.items) ? a.items : [];
+          u.ks.forEach((k, i) => {
+            const x = got.find((y) => Number(y.n) === i + 1) || (got.length === u.ks.length ? got[i] : null);
+            if (x) { answers[k] = x; job.result(`✓ ${g.jobs[k].text.slice(0, 40)} → ${answerText(x, cat)}`); }
+          });
+          if (job.stats) job.result(`   ${u.ks.length} items in one request · ${statsText(job.stats)}`);
+          for (const k of u.ks) if (!answers[k]) { job.step(k + 1, g.jobs[k].text); await ask1(k); } // the model skipped one: ask about it alone
+        }
       } catch (e) {
-        if (e instanceof Stopped) { noModel = true; stopped++; }
+        if (e instanceof Stopped) { noModel = true; stopped += u.ks.filter((k) => !answers[k]).length; }
         else if (/can't reach/.test(e.message)) { env.notice(`${e.message} — listing the rest without sorting.`, 9000); noModel = true; }
-        answers.push(null);
       }
     }
   } finally { if (job) job.end(); }
+  if (calls) env.notice(`Model: ${calls} request(s) for ${g.jobs.length} item(s), ${fmtSecs(modelSecs)} in all (${fmtSecs(modelSecs / g.jobs.length)} per item).`, 8000);
   if (stopped) env.notice(`Stopped — ${stopped} item(s) are listed in the Classified inbox without a destination.`, 8000);
   const records = jobRecords(g.jobs, answers, cat, cfg, today);
   await writeReview(app, cfg, records, g.sources, env.moment().format("YYYY-MM-DD HH:mm"));
@@ -4059,7 +4209,7 @@ module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
   getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
-  startJob, jobText, Stopped, cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  startJob, jobText, Stopped, feedStream, answerText, llmStats, statsText, batchMessages, cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   normPriority, migratePriorities, weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };
