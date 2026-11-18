@@ -200,3 +200,14 @@
 .pt-progress-bar > div { height: 100%; background: var(--interactive-accent); transition: width 0.4s; }
 .pt-progress-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; font-size: 0.85em; font-variant-numeric: tabular-nums; }
 .pt-progress-stop { padding: 2px 10px; font-size: 0.9em; }
+
+/* Active projects page + project navigation */
+.pt-proj-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.pt-proj-card .pt-card-head { align-items: baseline; }
+.pt-proj-card .pt-proj { font-weight: 600; font-size: 1.05em; }
+.pt-proj-card.pt-prio-1 { border-left: 3px solid var(--text-error); }
+.pt-proj-card.pt-prio-2 { border-left: 3px solid var(--color-orange, var(--text-warning)); }
+.pt-proj-foot { margin-top: 6px; font-size: var(--font-ui-smaller); }
+.pt-filter { flex: 1; min-width: 180px; }
+.pt-nav { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px; font-size: var(--font-ui-small); }
+.pt-nav-up { display: inline-block; margin-bottom: 8px; font-size: var(--font-ui-small); }

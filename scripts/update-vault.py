@@ -4,7 +4,7 @@
 What gets updated, and how:
 
   replaced   Tracker/Scripts/, Tracker/Views/, Tracker/Commands/,
-             Tracker/Start here.md, Tracker/Home.md, Tracker/Analytics.md, Tracker/Projects.md
+             Tracker/Start here.md, Tracker/Home.md, Tracker/Analytics.md, Tracker/Projects.md, Tracker/Active projects.md
   merged     Tracker/Config.md: your values are kept; settings that are new in
              this version are added with their defaults; the help text is updated
   created    Tracker/Inbox.md, only if it doesn't exist (never overwritten)
@@ -40,7 +40,7 @@ SRC = REPO / "Tracker"
 SAVED_PATH = REPO / ".vault-path"
 MANIFEST = "Tracker/.update-manifest.json"
 
-SYSTEM = ["Scripts", "Views", "Commands", "Start here.md", "Home.md", "Analytics.md", "Projects.md"]
+SYSTEM = ["Scripts", "Views", "Commands", "Start here.md", "Home.md", "Analytics.md", "Projects.md", "Active projects.md"]
 CONFIG = "Tracker/Config.md"
 INBOX = "Tracker/Inbox.md"
 # On a fresh install these Config settings start empty instead of pointing at the repo's samples.

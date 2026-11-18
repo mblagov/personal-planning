@@ -581,7 +581,12 @@ function archiveRoutineLines(ls, uptoWeek) {
   insertIntoSection(ls, DONE_SEC, moved);
   return take.length;
 }
-const R0 = () => ({ done: 0, missed: 0, upcoming: 0, skipped: 0 });
+// mins = time spent on done occurrences: the logged hands-on time, or else the routine's estimate (assumed)
+const R0 = () => ({ done: 0, missed: 0, upcoming: 0, skipped: 0, mins: 0, passive: 0, logged: 0, assumed: 0 });
+const rTime = (a) => (a && a.mins ? fmtDur(a.mins) : "–");
+const rTimeTitle = (a) => (a && (a.logged || a.assumed) ? `${a.logged} logged · ${a.assumed} from the estimate${a.passive ? ` · ⌛ ${fmtDur(a.passive)} passive` : ""}` : "no time logged and no estimate");
+/** Average time per week over the last n closed weeks that had occurrences. */
+function rWeekAvg(map, ids, n) { const ws = ids.filter((id) => map.get(id) && map.get(id).done + map.get(id).missed + map.get(id).skipped).slice(-n); return ws.length ? Math.round(sum(ws.map((id) => map.get(id).mins)) / ws.length) : null; }
 const rPct = (a) => (a && a.done + a.missed ? Math.round((100 * a.done) / (a.done + a.missed)) : null);
 function rSum(map, ids) { const out = R0(); for (const id of ids) { const a = map.get(id); if (a) for (const k of Object.keys(out)) out[k] += a[k]; } return out; }
 /** Routines and their occurrences, per routine and per week (the "integral" over all routines). */
@@ -603,7 +608,13 @@ function loadRoutines(d, linesByPath) {
       let state = isDone(it) ? "done" : it.status === "-" ? (/\[missed::/i.test(it.raw) ? "missed" : "skipped") : ref < today ? "missed" : "upcoming";
       if (state === "missed" && isOpen(it) && p.status !== "active") state = "skipped"; // paused project: not held against you
       const wid = weekId(m(ref, "YYYY-MM-DD"));
-      for (const map of [r.weeks, weeks]) { if (!map.has(wid)) map.set(wid, R0()); map.get(wid)[state]++; }
+      const tm = state === "done" ? timeOf(it.raw) : null;
+      for (const map of [r.weeks, weeks]) {
+        if (!map.has(wid)) map.set(wid, R0());
+        const a = map.get(wid);
+        a[state]++;
+        if (tm) { if (tm.active) { a.mins += tm.active; a.logged++; } else if (tm.est) { a.mins += tm.est; a.assumed++; } a.passive += tm.passive || 0; }
+      }
     }
   }
   const order = { daily: 0, weekly: 1, monthly: 2, yearly: 3, other: 4 };
@@ -2772,7 +2783,7 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
   d = await loadAll(app);
   const w0 = d.weekMap.get(id), count = w0.goals.length;
   const rw0 = d.routineWeeks.get(id), rp0 = rPct(rw0);
-  const rLine = rw0 && rp0 !== null ? `${rp0}% (${rw0.done}/${rw0.done + rw0.missed} done, ${rw0.missed} missed)` : null;
+  const rLine = rw0 && rp0 !== null ? `${rp0}% (${rw0.done}/${rw0.done + rw0.missed} done, ${rw0.missed} missed${rw0.mins ? `, ⏱ ${fmtDur(rw0.mins)}` : ""})` : null;
   const canSummarize = !env.isMobile || String(cfg.llm_mobile).toLowerCase() === "url";
 
   // 1. All the questions first — nothing is written until the end, and every question has ← Back.
@@ -3094,7 +3105,7 @@ function renderTaskWidgets(d, tasks) {
     if (d.routines.some((r) => r.project.status === "active")) {
       const rw = d.routineWeeks.get(d.curId), rp = rPct(rw), avg = routineAvg(d, d.curId, 4);
       const multi = new Set(c.routines.map((t) => t.project.path)).size > 1;
-      h += `<div class="pt-sub">Routines today${c.routines.length ? ` <span class="pt-count">${c.routines.length}</span>` : ""} <span class="pt-muted">· this week ${rw && rw.done + rw.missed ? `${rw.done}/${rw.done + rw.missed} · ${rp}%` : "–"}${avg !== null ? ` · 4-wk avg ${avg}%` : ""}</span></div>`;
+      h += `<div class="pt-sub">Routines today${c.routines.length ? ` <span class="pt-count">${c.routines.length}</span>` : ""} <span class="pt-muted">· this week ${rw && rw.done + rw.missed ? `${rw.done}/${rw.done + rw.missed} · ${rp}%` : "–"}${avg !== null ? ` · 4-wk avg ${avg}%` : ""}${rw && rw.mins ? ` · ⏱ ${fmtDur(rw.mins)}` : ""}</span></div>`;
       h += c.routines.length ? `<div class="pt-routines">${c.routines.map((t) => taskRow(d, t, { showProject: multi })).join("")}</div>` : `<div class="pt-empty">No routines left for today.</div>`;
     }
     const laterDays = [];
@@ -3627,7 +3638,7 @@ function renderHome(d, opts = {}) {
   h += `</div>`;
   const act = d.projects.filter((p) => p.status === "active" && !p.routine).length, back = d.projects.filter((p) => p.status === "backlog" && !p.routine).length;
   const nr = d.routines.filter((r) => r.project.status === "active").length;
-  h += `<div class="pt-foot pt-muted">${act} active · ${back} backlog projects${nr ? ` · ${nr} routines` : ""} · ${link(PROJECTS_PATH, "Projects & priorities →")} · ${link("Tracker/Analytics.md", "Analytics →")}</div>`;
+  h += `<div class="pt-foot pt-muted">${act} active · ${back} backlog projects${nr ? ` · ${nr} routines` : ""} · ${link(ACTIVE_PATH, "Active projects →")} · ${link(PROJECTS_PATH, "Projects & priorities →")} · ${link("Tracker/Analytics.md", "Analytics →")}</div>`;
   return h + `</div>`;
 }
 
@@ -3670,7 +3681,7 @@ function routineKpi(d, wid) {
   const a = d.routineWeeks.get(wid);
   if (!a || !(a.done + a.missed + a.upcoming)) return "";
   const p = rPct(a);
-  return kpi("Routines", p === null ? "–" : `${p}%`, `${a.done}/${a.done + a.missed} done${a.upcoming ? ` · ${a.upcoming} to go` : ""}`);
+  return kpi("Routines", p === null ? "–" : `${p}%`, `${a.done}/${a.done + a.missed} done${a.upcoming ? ` · ${a.upcoming} to go` : ""}${a.mins ? ` · ⏱ ${fmtDur(a.mins)}` : ""}`);
 }
 const pctCell = (a) => { const p = rPct(a); return p === null ? `<span class="pt-muted">–</span>` : `<span class="pt-dot pt-${scoreCls(p)}"></span>${p}%`; };
 const pctTitle = (a) => (a ? `${a.done} done · ${a.missed} missed${a.upcoming ? ` · ${a.upcoming} to go` : ""}${a.skipped ? ` · ${a.skipped} skipped` : ""}` : "no occurrences");
@@ -3680,13 +3691,13 @@ function routineWeekCard(d, wid) {
   if (!rows.length) return "";
   const a = d.routineWeeks.get(wid);
   const multi = new Set(rows.map((r) => r.project.path)).size > 1;
-  let h = `<div class="pt-card pt-wgroup"><div class="pt-goal-head"><span class="pt-proj">🔁 Routines</span><span class="pt-goal-text pt-muted">${esc(pctTitle(a))}</span></div>`;
+  let h = `<div class="pt-card pt-wgroup"><div class="pt-goal-head"><span class="pt-proj">🔁 Routines</span><span class="pt-goal-text pt-muted">${esc(pctTitle(a))}${a.mins ? ` · ⏱ ${fmtDur(a.mins)} spent` : ""}</span></div>`;
   h += `<div class="pt-goal-bar">${bar(rPct(a))}<span class="pt-goal-num">${rPct(a) === null ? "–" : rPct(a) + "%"}</span><span class="pt-goal-tasks">${a.done}/${a.done + a.missed} done</span></div>`;
-  h += `<table class="pt-table"><thead><tr><th>Routine</th><th>Repeats</th><th class="pt-num">Done</th><th class="pt-num">Missed</th><th class="pt-num">To go</th><th class="pt-num">%</th></tr></thead><tbody>`;
+  h += `<table class="pt-table"><thead><tr><th>Routine</th><th>Repeats</th><th class="pt-num">Done</th><th class="pt-num">Missed</th><th class="pt-num">To go</th><th class="pt-num">%</th><th class="pt-num" title="Time spent: logged ⏱, or the routine's estimate">⏱ Time</th></tr></thead><tbody>`;
   for (const r of rows) {
     const x = r.weeks.get(wid);
     h += `<tr><td>${link(r.project.path, r.name)}${multi ? ` <span class="pt-muted">${esc(r.project.scope || r.project.name)}</span>` : ""}</td><td class="pt-muted">${esc(r.rule)}</td>`
-      + `<td class="pt-num">${x.done}</td><td class="pt-num${x.missed ? " pt-late" : ""}">${x.missed}</td><td class="pt-num">${x.upcoming}</td><td class="pt-num" title="${esc(pctTitle(x))}">${pctCell(x)}</td></tr>`;
+      + `<td class="pt-num">${x.done}</td><td class="pt-num${x.missed ? " pt-late" : ""}">${x.missed}</td><td class="pt-num">${x.upcoming}</td><td class="pt-num" title="${esc(pctTitle(x))}">${pctCell(x)}</td><td class="pt-num" title="${esc(rTimeTitle(x))}">${rTime(x)}</td></tr>`;
   }
   return h + `</tbody></table></div>`;
 }
@@ -3708,20 +3719,37 @@ function routineAnalytics(d, ids, routines = d.routines, title = "Routines") {
   h += kpi("Routine avg · 4 wks", avgOf(d.curId, 4) === null ? "–" : `${avgOf(d.curId, 4)}%`, "mean of weekly %");
   h += kpi(`Routine avg · ${closed.length} wks`, avgOf(d.curId, closed.length) === null ? "–" : `${avgOf(d.curId, closed.length)}%`, `${span.done}/${span.done + span.missed} done · ${span.missed} missed`);
   h += kpi("This week so far", rPct(cur) === null ? "–" : `${rPct(cur)}%`, `${cur.done}/${cur.done + cur.missed} done${cur.upcoming ? ` · ${cur.upcoming} to go` : ""}`);
+  const avgT = rWeekAvg(map, closed, 4);
+  if (span.mins || cur.mins) h += kpi("⏱ Time · last week", rTime(last), `${avgT !== null ? `4-wk avg ${fmtDur(avgT) || "0m"} / week · ` : ""}this week ${rTime(cur)}`);
   h += `</div>`;
   h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">Routine completion per week</span><span class="pt-legend"><i class="pt-lg-bar"></i>done ÷ (done + missed) <i class="pt-lg-line"></i>4-week trend</span></div>`
     + chartPct(d, ids, ids.map((id) => rPct(map.get(id))), (id, v) => `${id}: ${v}% · ${pctTitle(map.get(id))}`, "Routine completion per week") + `</div>`;
   const multi = new Set(routines.map((r) => r.project.path)).size > 1;
-  h += `<div class="pt-card"><div class="pt-h">Per routine</div><div class="pt-heat-wrap"><table class="pt-table"><thead><tr><th>Routine</th><th>Repeats</th><th class="pt-num">This week</th><th class="pt-num">Last week</th><th class="pt-num">4-wk avg</th><th class="pt-num">${closed.length} wks</th><th class="pt-num">Missed</th></tr></thead><tbody>`;
+  h += `<div class="pt-card"><div class="pt-h">Per routine</div><div class="pt-heat-wrap"><table class="pt-table"><thead><tr><th>Routine</th><th>Repeats</th><th class="pt-num">This week</th><th class="pt-num">Last week</th><th class="pt-num">4-wk avg</th><th class="pt-num">${closed.length} wks</th><th class="pt-num">Missed</th><th class="pt-num" title="Average time per week over the last 4 weeks: logged ⏱, or the routine's estimate">⏱ / week</th></tr></thead><tbody>`;
   for (const r of routines) {
     const cw = r.weeks.get(d.curId), lw = r.weeks.get(lastId), all = rSum(r.weeks, closed);
     const a4 = routineAvg(d, d.curId, 4, r);
     h += `<tr><td>${link(r.project.path, r.name)}${multi ? ` <span class="pt-muted">${esc(r.project.scope || r.project.name)}</span>` : ""}${r.project.status !== "active" ? ` <span class="pt-muted">paused</span>` : ""}</td><td class="pt-muted">${esc(r.rule)}</td>`
       + `<td class="pt-num" title="${esc(pctTitle(cw))}">${pctCell(cw)}</td><td class="pt-num" title="${esc(pctTitle(lw))}">${pctCell(lw)}</td>`
       + `<td class="pt-num">${a4 === null ? `<span class="pt-muted">–</span>` : `<span class="pt-dot pt-${scoreCls(a4)}"></span>${a4}%`}</td>`
-      + `<td class="pt-num" title="${esc(pctTitle(all))}">${pctCell(all)}</td><td class="pt-num${all.missed ? " pt-late" : ""}">${all.missed}</td></tr>`;
+      + `<td class="pt-num" title="${esc(pctTitle(all))}">${pctCell(all)}</td><td class="pt-num${all.missed ? " pt-late" : ""}">${all.missed}</td>`
+      + `<td class="pt-num" title="${esc(rTimeTitle(all))}">${(() => { const v = rWeekAvg(r.weeks, closed, 4); return v ? fmtDur(v) : `<span class="pt-muted">–</span>`; })()}</td></tr>`;
   }
-  return h + `</tbody></table></div></div>`;
+  h += `</tbody></table></div></div>`;
+  // time per area: each routine project is one part of your life (household, health, admin…)
+  const areas = [...new Set(routines.map((r) => r.project))];
+  const areaMap = (p) => { const m2 = new Map(); for (const id of ids) { const out = R0(); for (const r of routines.filter((x) => x.project === p)) { const a = r.weeks.get(id); if (a) for (const k of Object.keys(out)) out[k] += a[k]; } m2.set(id, out); } return m2; };
+  if (span.mins || cur.mins) {
+    h += `<div class="pt-card"><div class="pt-card-head"><span class="pt-h">⏱ Time on routines</span><span class="pt-muted">logged time, or each routine's estimate (<code>[est::]</code>) when nothing was logged</span></div><div class="pt-heat-wrap"><table class="pt-table"><thead><tr><th>Area</th><th class="pt-num">This week</th><th class="pt-num">Last week</th><th class="pt-num">Avg / week · 4 wks</th><th class="pt-num">${closed.length} wks total</th><th class="pt-num">Logged</th></tr></thead><tbody>`;
+    const rows = areas.map((p) => [p, areaMap(p)]);
+    if (areas.length > 1) rows.push([null, map]);
+    for (const [p, m2] of rows) {
+      const tot = rSum(m2, closed), av = rWeekAvg(m2, closed, 4);
+      h += `<tr${p ? "" : ' class="pt-total"'}><td>${p ? link(p.path, p.name) : "<b>All routines</b>"}</td><td class="pt-num">${rTime(m2.get(d.curId))}</td><td class="pt-num">${rTime(m2.get(lastId))}</td><td class="pt-num">${av ? fmtDur(av) : "–"}</td><td class="pt-num" title="${esc(rTimeTitle(tot))}">${rTime(tot)}</td><td class="pt-num">${tot.logged + tot.assumed ? `${Math.round((100 * tot.logged) / (tot.logged + tot.assumed))}%` : "–"}</td></tr>`;
+    }
+    h += `</tbody></table></div></div>`;
+  }
+  return h;
 }
 /** All tasks picked for the week, grouped by goal (project), with live progress. Tick / edit right here. */
 function weekTaskList(d, w) {
@@ -3758,14 +3786,14 @@ function renderProject(d, path) {
   const ids = timeline(d, 16);
   if (p.routine) {
     const mine = d.routines.filter((r) => r.project === p);
-    let h = `<div class="pt">`;
+    let h = `<div class="pt">${link(ACTIVE_PATH, "All active projects", "pt-nav-up")}`;
     if (p.status !== "active") h += `<div class="pt-empty">Paused (status: ${esc(p.status)}) — missed occurrences aren't recorded and the routines are hidden on Home.</div>`;
     if (!mine.length) return h + `<div class="pt-empty">No routines yet. Add recurring tasks here, e.g. <code>- [ ] Stretch 🔁 every day ⏳ ${d.today.format("YYYY-MM-DD")}</code>.</div></div>`;
     const nxt = mine.filter((r) => r.next).map((r) => `<li>${esc(r.name)} <span class="pt-muted">· next ${r.next === d.today.format("YYYY-MM-DD") ? "today" : getMoment()(r.next, "YYYY-MM-DD").format("ddd D MMM")} · 🔁 ${esc(r.rule)}</span></li>`);
     if (nxt.length) h += `<div class="pt-card"><div class="pt-h">Coming up</div><ul class="pt-list">${nxt.join("")}</ul></div>`;
     return h + routineAnalytics(d, ids, mine, `${p.name} · last ${ids.length} weeks`) + `</div>`;
   }
-  let h = `<div class="pt">`;
+  let h = `<div class="pt">${projectNav(d, p)}`;
   if (p.objective) h += `<div class="pt-objective">🎯 ${esc(p.objective)}</div>`;
   h += `<div class="pt-kpis">${kpi("Status", esc(p.status))}${kpi("Weeks in focus", p.focusWeeks)}${kpi("Avg goal score", p.avg === null ? "–" : `${p.avg}%`)}${kpi("Tasks done", p.tasksDone, (() => { const c = mixSum(d, ids, p.path).cancelled; return c ? `✖ ${c} cancelled in 16 wks` : ""; })())}${mixKpi("Unplanned · 16 wks", mixSum(d, ids, p.path))}${timeKpi("Time · 16 wks", tSum(d, ids, p.path))}${kpi("Backlog", p.backlog.length)}</div>`;
   h += `<div class="pt-h">Focus · last 16 weeks</div><div class="pt-strip">${ids.map((id) => {
@@ -3913,6 +3941,44 @@ function selectHtml(path, key, value, options, labels = {}) {
   const opts = options.includes(value) ? options : [value, ...options];
   return `<select class="dropdown pt-select pt-select-${key}" data-path="${esc(path)}" data-key="${esc(key)}" aria-label="${esc(key)}">${opts.map((o) => `<option value="${esc(o)}"${o === value ? " selected" : ""}>${esc(labels[o] || o)}</option>`).join("")}</select>`;
 }
+const ACTIVE_PATH = `${TRACKER_ROOT}/Active projects.md`;
+/** Active (non-routine) projects in priority order — the order of Active projects and of ← / → on project pages. */
+function activeOrder(d) { return d.projects.filter((p) => p.status === "active" && !p.routine).sort((a, b) => projPrioRank(a) - projPrioRank(b) || a.name.localeCompare(b.name)); }
+/** ← previous · Active projects · next → at the top of a project page. */
+function projectNav(d, p) {
+  const list = activeOrder(d), i = list.indexOf(p);
+  if (i < 0) return `<div class="pt-nav">${link(ACTIVE_PATH, "All active projects")}<span class="pt-muted"> · ${esc(p.status)} — not in the active list</span></div>`;
+  const prev = list[(i - 1 + list.length) % list.length], next = list[(i + 1) % list.length];
+  return `<div class="pt-nav">${list.length > 1 ? link(prev.path, `← ${prev.name}`, "pt-nav-prev") : "<span></span>"}<span>${link(ACTIVE_PATH, `Active projects · ${i + 1}/${list.length}`)} <span class="pt-muted">P${p.priority}</span></span>${list.length > 1 ? link(next.path, `${next.name} →`, "pt-nav-next") : "<span></span>"}</div>`;
+}
+/** Tracker/Active projects: every active project as a card, by priority, with a filter box. */
+function renderActive(d) {
+  const list = activeOrder(d);
+  let h = `<div class="pt">`;
+  if (!list.length) return h + `<div class="pt-empty">No active projects — set a project's status to active in ${link(PROJECTS_PATH, "Projects")}.</div></div>`;
+  const cur = d.weekMap.get(d.curId);
+  h += `<div class="pt-actions"><input type="search" class="pt-filter" placeholder="Filter ${list.length} active projects…" aria-label="Filter projects"><span class="pt-muted">by priority · ${link(PROJECTS_PATH, "change priority / status")}</span></div><div class="pt-proj-grid">`;
+  for (const p of list) {
+    const g = cur ? cur.goals.find((x) => x.projectPath === p.path) : null;
+    const b = d.sel.get(d.curId) && d.sel.get(d.curId).get(p.path);
+    const open = b ? b.here.filter(isOpen).map((t) => toTaskItem(d, t)).sort((x, y) => String(x.scheduled || x.due || "9").localeCompare(String(y.scheduled || y.due || "9"))) : [];
+    const left = p.backlog.length + (p.openPlanned || 0);
+    h += `<div class="pt-card pt-proj-card pt-prio-${p.priority}" data-name="${esc(`${p.name} ${p.scope} ${p.description} ${p.keywords.join(" ")}`.toLowerCase())}">
+      <div class="pt-card-head">${link(p.path, p.name, "pt-proj")}<span class="pt-badge">P${p.priority}</span></div>
+      ${p.description ? `<div class="pt-muted pt-desc">${esc(p.description)}</div>` : ""}
+      ${p.objective ? `<div class="pt-objective">🎯 ${esc(p.objective)}</div>` : ""}
+      ${g ? `<div class="pt-goal-text">This week: ${esc(g.text)}</div><div class="pt-goal-bar">${bar(g.score)}<span class="pt-goal-num">${g.score}%</span><span class="pt-goal-tasks">${g.doneCount}/${g.counted.length} tasks</span></div>` : `<div class="pt-muted">Not in this week's plan</div>`}
+      ${open.length ? `<ul class="pt-list">${open.slice(0, 3).map((t) => `<li>${esc(t.desc)}${t.scheduled || t.due ? ` <span class="pt-muted">${t.due ? "📅" : "⏳"} ${getMoment()(t.due || t.scheduled, "YYYY-MM-DD").format("ddd D")}</span>` : ""}</li>`).join("")}${open.length > 3 ? `<li class="pt-muted">+${open.length - 3} more</li>` : ""}</ul>` : ""}
+      <div class="pt-muted pt-proj-foot">${left} open task(s) · ${p.lastFocus ? (p.weeksSince <= 0 ? "in focus this week" : `last focus ${p.weeksSince}w ago`) : "not started"}${p.avg !== null ? ` · avg ${p.avg}%` : ""}</div>
+    </div>`;
+  }
+  h += `</div>`;
+  const areas = d.projects.filter((p) => p.routine && p.status === "active");
+  if (areas.length) h += `<div class="pt-muted pt-hint">Routines: ${areas.map((p) => link(p.path, p.name)).join(" · ")}</div>`;
+  const parked = d.projects.filter((p) => !p.routine && p.status === "backlog");
+  if (parked.length) h += `<div class="pt-muted pt-hint">Backlog (not active): ${parked.sort((a, b) => projPrioRank(a) - projPrioRank(b)).map((p) => link(p.path, p.name)).join(" · ")}</div>`;
+  return h + `</div>`;
+}
 /** Tracker/Projects: every project, with priority and status you can change right here. */
 function renderProjects(d) {
   const store = d.descStore || {};
@@ -3963,6 +4029,7 @@ async function render(app, mode, path, opts = {}) {
   if (mode === "week") return renderWeek(d, path, opts);
   if (mode === "project") { d.aiStore = await loadAnalysis(app); d.aiLines = ((await readPath(app, path)) || "").split("\n"); return renderProject(d, path); }
   if (mode === "analytics") return renderAnalytics(d, opts);
+  if (mode === "active") return renderActive(d);
   if (mode === "projects") { d.descStore = await loadDescStore(app); return renderProjects(d); }
   return `<div class="pt-empty">Unknown mode: ${esc(mode)}</div>`;
 }

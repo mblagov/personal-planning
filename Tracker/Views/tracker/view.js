@@ -246,6 +246,13 @@ try {
       await draw();
     }));
 
+    // Active projects: filter the cards as you type
+    const filter = root.querySelector("input.pt-filter");
+    if (filter) filter.addEventListener("input", () => {
+      const q = filter.value.trim().toLowerCase();
+      root.querySelectorAll(".pt-proj-card").forEach((c) => { c.style.display = !q || c.dataset.name.includes(q) || c.textContent.toLowerCase().includes(q) ? "" : "none"; });
+    });
+
     // Home: reorder this week's projects (moves the goal lines in the week note)
     root.querySelectorAll("button[data-move]").forEach((b) => b.addEventListener("click", async () => {
       root.querySelectorAll("button[data-move]").forEach((x) => { x.disabled = true; });

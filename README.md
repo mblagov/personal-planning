@@ -15,6 +15,7 @@ Everything is plain Markdown. It runs on the Mac and on the iPhone.
 │   ├── Home.md               # main dashboard: today, this week, attention
 │   ├── Analytics.md          # 12-week trends, heatmap, miss reasons
 │   ├── Projects.md           # all projects: priority, status, description quality
+│   ├── Active projects.md    # active projects as cards, by priority; ← / → on project pages
 │   ├── Config.md             # all settings (frontmatter)
 │   ├── Inbox.md              # capture: tasks or any free text
 │   ├── Commands/             # Templater entry points (one per command)
@@ -75,7 +76,7 @@ The script shows its plan and asks before changing anything. It remembers the va
 
 | Files in the vault | What the script does |
 |---|---|
-| `Tracker/Scripts/`, `Views/`, `Commands/`, `Start here.md`, `Home.md`, `Analytics.md`, `Projects.md` | Replaces them with the repo's version |
+| `Tracker/Scripts/`, `Views/`, `Commands/`, `Start here.md`, `Home.md`, `Analytics.md`, `Projects.md`, `Active projects.md` | Replaces them with the repo's version |
 | `Tracker/Config.md` | Merges it. Your values stay, new settings are added with their defaults, and the help text is updated. |
 | `Tracker/Inbox.md` | Creates it only if it's missing. It never overwrites it. |
 | `Tracker/Weeks/`, `Tracker/AI/`, your projects, all other notes | Never touches them |
@@ -173,6 +174,7 @@ A project with `kind: routine` holds recurring tasks (🔁) and is always in foc
 
 - **Missed occurrences** are cancelled as `[-] … [missed:: yes]` and the next one is created, once per missed day, week or month. This happens when Home opens, and in planning and review.
 - **Routine score:** a week's score is *done ÷ (done + missed)*, for all routines together and per routine. The routine average is reported separately on Home, the week note, the routine project page and Analytics.
+- **Time:** give a routine an estimate (`[est:: 20m]`) and each done occurrence counts that much, unless you log the real time with ⏱. Analytics shows the time per routine project (area of your life) per week.
 - **Priority:** routines without a 📅 or ⏫ are listed below project work on Home.
 
 See *Routines* in [Tracker/Start here.md](Tracker/Start%20here.md).
