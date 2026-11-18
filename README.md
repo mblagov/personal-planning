@@ -181,11 +181,16 @@ See *Routines* in [Tracker/Start here.md](Tracker/Start%20here.md).
 
 ## Upgrading an existing vault
 
-After pulling a new version, run `scripts/update-vault.py` (it shows its plan and asks first), then in Obsidian run **Register projects** once. Version-specific steps:
-
-- **Priorities 1–5:** Register projects rewrites old `priority: high / medium / low` as `2 / 3 / 4` (unset stays 3). Then open `Tracker/Projects` and give your most important projects `1` and the ones you're happy to leave alone `4`–`5`. The Config setting `neglect_weeks` is replaced by `focus_priority` (default `2`): the update adds it, and the old key can be deleted.
-- **Google Calendar (optional):** fill in `calendar_client_id` / `calendar_client_secret` and run **Sync calendar** on the Mac — see *Start here → Google Calendar*.
-- **New commands:** add `Cancel task.md` and `Sync calendar.md` from `Tracker/Commands/` under Templater → Template hotkeys.
+1. **Preview, then update.** `scripts/update-vault.py --dry-run` shows what would change; `scripts/update-vault.py` does it (asks first, backs up every replaced file to `~/ObsidianTrackerBackups/`). Your projects, weeks, inbox and `Tracker/AI/` aren't touched; `Config.md` keeps your values and gets the new settings.
+2. **Restart Obsidian on the Mac** (or reload it), so the new script and views are picked up.
+3. **Template hotkeys** (Settings → Templater): make sure all twelve files in `Tracker/Commands/` are listed — newer ones are `Add tasks`, `Apply inbox`, `Log time`, `Cancel task`, `Sync calendar`.
+4. **Run Register projects** once: it adds the `## Planned` / `## Unplanned` sections to older project notes and rewrites old priorities `high / medium / low` as `2 / 3 / 4`.
+5. **Set priorities** in `Tracker/Projects`: 1 for the projects you want to finish first … 5 for the ones you're happy to leave alone. Plan week follows this order.
+6. **Look through `Tracker/Config`**: delete `neglect_weeks` and `llm_auto_file_confidence` if they're still there (no longer used), and check the new settings — `focus_priority`, `plan_estimates`, `plan_times`, `log_time_on_done`, `llm_flag_below`, `reference_folder`, `finance_file`, `finance_project`, `currency`, `calendar_*`. The table under the settings explains each.
+7. **Routines time** (optional): add an estimate to the open occurrence of each routine you want to track, e.g. `[est:: 20m]` — later occurrences copy it.
+8. **Inbox note** (optional): `Tracker/Inbox.md` is never overwritten; if yours still has the old explanation at the top, copy the callout from the repo's `Tracker/Inbox.md`.
+9. **Google Calendar** (optional): fill in `calendar_client_id` / `calendar_client_secret` and run **Sync calendar** on the Mac — see *Start here → Google Calendar*.
+10. **iPhone**: nothing to install. Let the vault sync, then reopen Obsidian there.
 
 ## Settings
 
