@@ -265,6 +265,7 @@ try {
     root.querySelectorAll("button[data-ai]").forEach((b) => b.addEventListener("click", async () => {
       root.querySelectorAll("button[data-ai]").forEach((x) => { x.disabled = true; });
       if (b.dataset.ai === "analyze") b.textContent = "Analyzing…";
+      if (b.dataset.ai === "refine") b.textContent = "Refining…";
       try { const msg = await core.projectAction(env, b.dataset.ai, b.dataset.path, b.dataset.i); if (msg) notify(msg); }
       catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
       await draw();

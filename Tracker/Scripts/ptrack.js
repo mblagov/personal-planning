@@ -2163,12 +2163,130 @@ async function mergeTasks(app, path, lines, text) {
   return ok;
 }
 /** Buttons on the project page's AI review card: analyze | add | add-week | skip-missing | merge | skip-dup. Returns a message. */
+/* ---- Refine backlog: the model proposes clearer wording and merges of duplicates; you confirm each change on a diff. */
+function backlogTasks(lines) {
+  const s = findSection(lines, "Backlog");
+  return s ? parseItems(lines, s.start, s.end).filter((it) => it.task && !it.parent && isOpen(it) && it.desc).map((it) => ({ raw: it.raw, desc: it.desc })) : [];
+}
+function refineMessages(p, tasks) {
+  const system = "You tidy up the backlog of a project in a personal planning system. You answer with one JSON object and nothing else.";
+  const user = `Project: ${p.name}${p.description ? ` — ${p.description}` : ""}
+
+Backlog:
+${tasks.map((t, i) => `T${i + 1}: ${t.desc}`).join("\n")}
+
+Answer:
+- "duplicates": groups of tasks that are the same work. Each: "tasks" (two or more ids), "merged" (one clear task text that covers all of them), "why" (a few words). Related but different steps are not duplicates. [] if none.
+- "rewrites": tasks whose wording is unclear, vague, too long or not an action. Each: "task" (its id), "text" (the better wording), "why" (a few words). Start with a verb, keep it short and specific, keep the meaning, every name, number, link and #tag, and the language of the task. Don't touch tasks that are already clear, and don't rewrite tasks that are in a duplicates group. [] if none.
+
+Answer with JSON like {"duplicates":[{"tasks":["T2","T5"],"merged":"Call the marina about the winter berth","why":"same call"}],"rewrites":[{"task":"T3","text":"Order 2 fenders for the stern","why":"vague"}]}`;
+  return [{ role: "system", content: system }, { role: "user", content: user }];
+}
+const REFINE_SCHEMA = (tids) => ({ type: "object", properties: {
+  duplicates: { type: "array", items: { type: "object", properties: { tasks: { type: "array", items: { type: "string", enum: tids } }, merged: { type: "string" }, why: { type: "string" } }, required: ["tasks", "merged", "why"], additionalProperties: false } },
+  rewrites: { type: "array", items: { type: "object", properties: { task: { type: "string", enum: tids }, text: { type: "string" }, why: { type: "string" } }, required: ["task", "text", "why"], additionalProperties: false } },
+}, required: ["duplicates", "rewrites"], additionalProperties: false });
+function normalizeRefine(out, tasks) {
+  const norm = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const id = (t) => parseInt(String(t).replace(/\D/g, ""), 10) - 1;
+  const used = new Set(), changes = [];
+  for (const g of Array.isArray(out && out.duplicates) ? out.duplicates : []) {
+    const idx = [...new Set((Array.isArray(g && g.tasks) ? g.tasks : []).map(id))].filter((i) => i >= 0 && i < tasks.length && !used.has(i));
+    if (idx.length < 2) continue;
+    idx.forEach((i) => used.add(i));
+    changes.push({ type: "merge", lines: idx.map((i) => tasks[i].raw), text: oneLine(g.merged) || tasks[idx[0]].desc, why: oneLine(g.why) });
+  }
+  for (const r of Array.isArray(out && out.rewrites) ? out.rewrites : []) {
+    const i = id(r && r.task), text = oneLine(r && r.text);
+    if (!(i >= 0 && i < tasks.length) || used.has(i) || !text || norm(text) === norm(tasks[i].desc)) continue;
+    used.add(i);
+    changes.push({ type: "rewrite", lines: [tasks[i].raw], text, why: oneLine(r.why) });
+  }
+  return changes;
+}
+async function refineBacklog(env, path) {
+  const { app } = env, cfg = getConfig(app);
+  const p = listProjects(app, cfg).find((x) => x.path === path);
+  if (!p || p.routine) throw new Error("not a project with a backlog");
+  const tasks = backlogTasks((await readPath(app, path)).split("\n"));
+  if (tasks.length < 1) throw new Error("the backlog is empty");
+  const out = extractJson(await llmChat(env, cfg, refineMessages(p, tasks), REFINE_SCHEMA(tasks.map((_, i) => `T${i + 1}`))));
+  return { changes: normalizeRefine(out, tasks), count: tasks.length, created: env.moment().format("YYYY-MM-DD HH:mm") };
+}
+/** Word-level diff → [html of the old text with <del>, html of the new text with <ins>]. */
+function wordDiff(a, b) {
+  const A = String(a).split(/(\s+)/), B = String(b).split(/(\s+)/);
+  const n = A.length, m = B.length, L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  let i = 0, j = 0, o = "", nw = "";
+  while (i < n || j < m) {
+    if (i < n && j < m && A[i] === B[j]) { o += esc(A[i]); nw += esc(B[j]); i++; j++; }
+    else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) { nw += /^\s+$/.test(B[j]) ? B[j] : `<ins>${esc(B[j])}</ins>`; j++; }
+    else { o += /^\s+$/.test(A[i]) ? A[i] : `<del>${esc(A[i])}</del>`; i++; }
+  }
+  return [o.replace(/<\/del>(\s*)<del>/g, "$1"), nw.replace(/<\/ins>(\s*)<ins>/g, "$1")];
+}
+function refineCard(d, p, r, lines) {
+  const btn = (act, label, i, cta = false, title = "", dis = false) => `<button class="pt-mini${cta ? " mod-cta" : ""}" data-ai="${act}" data-path="${esc(p.path)}"${i !== undefined ? ` data-i="${i}"` : ""}${title ? ` title="${esc(title)}"` : ""}${dis ? " disabled" : ""}>${label}</button>`;
+  let h = `<div class="pt-card pt-ai"><div class="pt-card-head"><span class="pt-h">✨ Refine backlog</span>${r ? `<span class="pt-muted">proposed ${esc(r.created)}</span>` : ""}${btn("refine", r ? "↻ Refine again" : "Refine with the local model", undefined, !r, "The model proposes clearer wording and merges of duplicates in ## Backlog; you confirm each change")}</div>`;
+  if (!r) return h + `<div class="pt-muted pt-hint">Proposes clearer wording for vague backlog items and merges items that are the same work. Every change is shown as a diff and only made when you press Apply.</div></div>`;
+  if (!r.changes.length) return h + `<div class="pt-muted">No changes proposed — the backlog looks clear.${btn("refine-clear", "OK", undefined)}</div></div>`;
+  const here = new Set(lines || []);
+  h += `<div class="pt-muted pt-hint">${r.changes.length} change(s). Dates, priorities and fields stay as they are; only the wording changes. Apply or skip each one.</div>`;
+  h += r.changes.map((c, i) => {
+    const stale = c.lines.some((l) => !here.has(l));
+    let diff = "";
+    if (c.type === "rewrite") {
+      const [o, nw] = wordDiff(taskDesc(c.lines[0]), c.text);
+      diff = `<div class="pt-diff-old">− ${o}</div><div class="pt-diff-new">+ ${nw}</div>`;
+    } else {
+      diff = c.lines.map((l) => `<div class="pt-diff-old">− ${wordDiff(taskDesc(l), c.text)[0]}</div>`).join("") + `<div class="pt-diff-new">+ ${wordDiff(taskDesc(c.lines[0]), c.text)[1]}</div>`;
+    }
+    return `<div class="pt-ai-row${stale ? " is-stale" : ""}"><div class="pt-diff"><div class="pt-diff-kind">${c.type === "merge" ? `Merge ${c.lines.length} duplicates` : "Rephrase"}${c.why ? ` <span class="pt-muted">· ${esc(c.why)}</span>` : ""}${stale ? ` <span class="pt-warn">· changed since — skip or refine again</span>` : ""}</div>${diff}${c.type === "merge" ? `<div class="pt-muted pt-hint">One task stays (the one planned for a week, else the first) with this text; the others become “(merged) …” notes under it.</div>` : ""}</div>`
+      + `<div class="pt-ai-btns">${btn("refine-apply", "✔ Apply", i, true, "Make this change in the backlog", stale)}${btn("refine-skip", "Skip", i, false, "Don't make this change")}</div></div>`;
+  }).join("");
+  return h + `</div>`;
+}
 async function projectAction(env, act, path, i) {
   const { app } = env, cfg = getConfig(app);
   const store = await loadAnalysis(app);
   const a = store[path];
   const today = env.moment().format("YYYY-MM-DD");
   let msg = "";
+  const rk = `refine:${path}`;
+  if (act === "refine") {
+    const job = startJob(env, "✨ Refining the backlog", 1);
+    job.step(1, (listProjects(app, cfg).find((x) => x.path === path) || {}).name || "");
+    try { store[rk] = await refineBacklog(env, path); }
+    catch (e) { if (e instanceof Stopped) return "Stopped — nothing changed."; throw e; }
+    finally { job.end(); }
+    await saveAnalysis(app, store);
+    const c = store[rk].changes;
+    return c.length ? `✨ ${c.filter((x) => x.type === "rewrite").length} rewording(s), ${c.filter((x) => x.type === "merge").length} merge(s) proposed — check each one below.` : "✨ The backlog looks clear — nothing to change.";
+  }
+  if (act === "refine-apply" || act === "refine-skip" || act === "refine-clear") {
+    const r = store[rk];
+    if (!r) throw new Error("no proposals — refine first");
+    i = Number(i);
+    if (act === "refine-clear") delete store[rk];
+    else {
+      const c = r.changes[i];
+      if (!c) throw new Error("that proposal is gone");
+      if (act === "refine-apply") {
+        if (c.type === "merge") { if (!(await mergeTasks(app, path, c.lines, c.text))) throw new Error("those tasks changed since — refine again"); msg = `Merged ${c.lines.length} tasks into “${c.text}”`; }
+        else {
+          let ok = false;
+          await editLines(app, path, (ls) => { const k = ls.indexOf(c.lines[0]); if (k >= 0) { ls[k] = replaceDesc(c.lines[0], c.text); ok = true; } });
+          if (!ok) throw new Error("that task changed since — refine again");
+          msg = `Reworded: “${c.text}”`;
+        }
+      }
+      r.changes.splice(i, 1);
+      if (!r.changes.length) delete store[rk];
+    }
+    await saveAnalysis(app, store);
+    return msg;
+  }
   if (act === "analyze") {
     const job = startJob(env, "🔍 Analyzing tasks vs goals", 1);
     job.step(1, (getConfig(app) && (listProjects(app, cfg).find((x) => x.path === path) || {}).name) || "");
@@ -3969,6 +4087,7 @@ function renderProject(d, path) {
   }
   h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", true], ["Add tasks this week (unplanned)", "Add tasks"]])}</div>`;
   h += analysisCard(d, p, (d.aiStore || {})[p.path], d.aiLines);
+  h += refineCard(d, p, (d.aiStore || {})[`refine:${p.path}`], d.aiLines);
   const past = p.history.filter((x) => x.week < d.curId).slice(-8).reverse();
   if (past.length) {
     h += `<div class="pt-h">Recent goals</div><table class="pt-table"><thead><tr><th>Week</th><th>Goal</th><th>Score</th><th></th></tr></thead><tbody>`;
@@ -4209,7 +4328,7 @@ module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
   getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
-  startJob, jobText, Stopped, feedStream, answerText, llmStats, statsText, batchMessages, cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
+  wordDiff, normalizeRefine, backlogTasks, startJob, jobText, Stopped, feedStream, answerText, llmStats, statsText, batchMessages, cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   normPriority, migratePriorities, weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
 };
