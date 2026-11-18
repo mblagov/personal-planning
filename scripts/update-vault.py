@@ -269,4 +269,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except PermissionError as e:
+        raise SystemExit(
+            f"\nmacOS didn't allow access to {e.filename}.\n"
+            "Folders like Documents, Desktop and iCloud Drive are protected. Either:\n"
+            "  - run this script from the Terminal app (macOS asks once whether Terminal may open the folder; allow it), or\n"
+            "  - System Settings → Privacy & Security → Files & Folders (or Full Disk Access) → turn it on for the app you ran this from.\n"
+            "Nothing was changed.")
