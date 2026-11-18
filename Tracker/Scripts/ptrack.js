@@ -2651,33 +2651,79 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
   const wlink = linkTo(app, wp, wp);
   const nextId = shiftWeek(id, 1);
   d = await loadAll(app);
-  const count = d.weekMap.get(id).goals.length;
+  const w0 = d.weekMap.get(id), count = w0.goals.length;
+  const rw0 = d.routineWeeks.get(id), rp0 = rPct(rw0);
+  const rLine = rw0 && rp0 !== null ? `${rp0}% (${rw0.done}/${rw0.done + rw0.missed} done, ${rw0.missed} missed)` : null;
+  const canSummarize = !env.isMobile || String(cfg.llm_mobile).toLowerCase() === "url";
 
+  // 1. All the questions first — nothing is written until the end, and every question has ← Back.
+  const BACK = "__back__";
+  const ans = {};
+  const steps = [];
+  const pick = async (labels, values, head, key, first) => {
+    const prev = ans[key];
+    const i = values.findIndex((v) => v === prev);
+    const L = [...labels], V = [...values];
+    if (!first) { L.push("← Back"); V.push(BACK); }
+    const v = await env.suggest(L, V, `${head}${i >= 0 ? ` — now: ${labels[i].replace(/^[^\w(]+/u, "").slice(0, 40)}` : ""}${first ? " · Esc cancels" : ""}`);
+    if (v === null || v === undefined) throw new Cancelled();
+    return v;
+  };
+  const text = async (q, key, multi = false) => { // Esc = back
+    const v = await env.prompt(`${q} · Esc = back`, ans[key] !== undefined ? String(ans[key]) : "", multi);
+    return v === null || v === undefined ? BACK : v;
+  };
+  w0.goals.forEach((g, gi) => {
+    if (g.fields.result !== undefined && g.fields.result !== "") return; // already reviewed
+    const k = `g${gi}`, nOpen = g.here.filter(isOpen).length + g.legacy.filter(isOpen).length;
+    const head = `${gi + 1}/${count} · ${g.projectName}: “${g.text}” — ${g.doneCount}/${g.counted.length} tasks done`;
+    steps.push({ key: `${k}.outcome`, run: (first) => pick(["✅ Achieved", `◐ Partly (${g.score}% by tasks — adjust)`, "✗ Missed"], ["ok", "part", "miss"], head, `${k}.outcome`, first) });
+    steps.push({ key: `${k}.pct`, when: () => ans[`${k}.outcome`] === "part", run: async () => {
+      const v = await text(`${g.projectName}: how far did you get? (0–100)`, `${k}.pct`);
+      if (v === BACK) return BACK;
+      const n = parseInt(v, 10);
+      return isNaN(n) ? g.score : clamp(n, 0, 99);
+    } });
+    steps.push({ key: `${k}.miss`, when: () => ans[`${k}.outcome`] && ans[`${k}.outcome`] !== "ok",
+      run: () => pick([...MISS_REASONS.map((r) => r[1]), "Other…"], [...MISS_REASONS.map((r) => r[0]), "other"], `${g.projectName}: main reason it fell short?`, `${k}.miss`) });
+    steps.push({ key: `${k}.missText`, when: () => ans[`${k}.outcome`] !== "ok" && ans[`${k}.miss`] === "other", run: () => text(`${g.projectName}: reason (a few words)`, `${k}.missText`) });
+    if (nOpen) steps.push({ key: `${k}.action`, run: () => pick(
+      [`→ Plan the ${nOpen} open task(s) for ${nextId}${ans[`${k}.outcome`] !== "ok" ? " (and carry the goal)" : ""}`, `↩ Return them to the ${g.projectName} backlog`, "✗ Drop them", "Leave them as they are"],
+      ["carry", "return", "drop", "leave"], `${g.projectName}: ${nOpen} unfinished task(s)`, `${k}.action`) });
+  });
+  w0.extra.forEach((x, xi) => {
+    const n = x.here.filter(isOpen).length;
+    if (!n) return;
+    steps.push({ key: `x${xi}.action`, run: (first) => pick([`→ Plan them for ${nextId}`, `↩ Return them to the ${x.projectName} backlog`, "✗ Drop them", "Leave them as they are"],
+      ["carry", "return", "drop", "leave"], `${x.projectName} (no goal): ${n} unfinished task(s)`, `x${xi}.action`, first) });
+  });
+  steps.push({ key: "wins", run: () => text("Wins — what moved forward? (optional)", "wins", true) });
+  steps.push({ key: "lessons", run: () => text("What got in the way / what will you change? (optional)", "lessons", true) });
+  steps.push({ key: "energy", run: () => pick(["5 — great", "4 — good", "3 — okay", "2 — low", "1 — drained", "Skip"], [5, 4, 3, 2, 1, 0], "Energy this week", "energy") });
+  if (canSummarize) steps.push({ key: "ai", run: () => pick(["Write a short AI summary with the local model", "No summary"], [true, false], "Summary", "ai") });
+  steps.push({ key: "confirm", run: () => pick(["✔ Save the review", "✖ Cancel — change nothing"], ["save", "cancel"], `${id}: ${Object.keys(ans).filter((x) => x.endsWith(".outcome")).length} goal(s) answered — save?`, "confirm") });
+  const hist = [];
+  for (let i = 0; i < steps.length;) {
+    const st = steps[i];
+    if (st.when && !st.when()) { i++; continue; }
+    const v = await st.run(!hist.length);
+    if (v === BACK) { if (hist.length) i = hist.pop(); continue; }
+    ans[st.key] = v;
+    if (st.key === "confirm" && v === "cancel") throw new Cancelled();
+    hist.push(i); i++;
+  }
+
+  // 2. Write it all.
   for (let gi = 0; gi < count; gi++) {
+    const k = `g${gi}`, outcome = ans[`${k}.outcome`];
+    if (!outcome) continue;
     d = await loadAll(app);
     const g = d.weekMap.get(id).goals[gi];
-    if (g.fields.result !== undefined && g.fields.result !== "") continue; // already reviewed
-    const live = g.score;
-    const projName = g.projectName;
-    const openHere = g.here.filter(isOpen), openLegacy = g.legacy.filter(isOpen);
-    const nOpen = openHere.length + openLegacy.length;
-    const head = `${gi + 1}/${count} · ${projName}: “${g.text}” — ${g.doneCount}/${g.counted.length} tasks done`;
-    const outcome = await ask(env, ["✅ Achieved", `◐ Partly (${live}% by tasks — adjust)`, "✗ Missed"], ["ok", "part", "miss"], head);
-    let result = 100, miss = null;
-    if (outcome === "part") {
-      const v = parseInt(await env.prompt(`How far did you get? (0–100)`, String(live)), 10);
-      result = isNaN(v) ? live : clamp(v, 0, 99);
-    } else if (outcome === "miss") result = 0;
-    if (outcome !== "ok") {
-      miss = await ask(env, [...MISS_REASONS.map((r) => r[1]), "Other…"], [...MISS_REASONS.map((r) => r[0]), "other"], "Main reason it fell short?");
-      if (miss === "other") miss = oneLine(await env.prompt("Reason (a few words)", "")).toLowerCase() || "other";
-    }
-    let action = "leave";
-    if (nOpen) {
-      action = await ask(env,
-        [`→ Plan the ${nOpen} open task(s) for ${nextId}${outcome !== "ok" ? " (and carry the goal)" : ""}`, `↩ Return them to the ${projName} backlog`, "✗ Drop them", "Leave them as they are"],
-        ["carry", "return", "drop", "leave"], `${nOpen} unfinished task(s)`);
-    }
+    const openHere = g.here.filter(isOpen);
+    const result = outcome === "ok" ? 100 : outcome === "miss" ? 0 : ans[`${k}.pct`];
+    let miss = outcome === "ok" ? null : ans[`${k}.miss`];
+    if (miss === "other") miss = oneLine(ans[`${k}.missText`]).toLowerCase() || "other";
+    const action = ans[`${k}.action`] || "leave";
     // goal line (+ tasks nested in the week note by older plans)
     const legacyCopies = [];
     await editLines(app, wp, (ls) => {
@@ -2705,36 +2751,25 @@ async function cmdReview(env, forcedId, { thenPlan = true } = {}) {
       if (!has) await addGoal(app, np, g.text, g.projectPath, [], { from: wlink });
     }
   }
-
   // projects with tasks picked for this week but no goal
   d = await loadAll(app);
-  for (const x of d.weekMap.get(id).extra) {
-    const open = x.here.filter(isOpen);
-    if (!open.length) continue;
-    const action = await ask(env, [`→ Plan them for ${nextId}`, `↩ Return them to the ${x.projectName} backlog`, "✗ Drop them", "Leave them as they are"],
-      ["carry", "return", "drop", "leave"], `${x.projectName} (no goal): ${open.length} unfinished task(s)`);
-    await applyTaskAction(app, open, action, id, nextId);
+  for (let xi = 0; xi < w0.extra.length; xi++) {
+    const action = ans[`x${xi}.action`];
+    if (!action) continue;
+    const x = d.weekMap.get(id).extra.find((e) => e.projectPath === w0.extra[xi].projectPath);
+    if (x) await applyTaskAction(app, x.here.filter(isOpen), action, id, nextId);
   }
   const archived = await archiveDone(app, await loadAll(app), id);
-  // Routines: the week's result (before archiving, the counts are the same either way) and tidy-up.
-  const rd = await loadAll(app);
-  const rw = rd.routineWeeks.get(id), rp = rPct(rw);
-  const rLine = rw && rp !== null ? `${rp}% (${rw.done}/${rw.done + rw.missed} done, ${rw.missed} missed)` : null;
   let rArchived = 0;
-  for (const p of rd.projects.filter((x) => x.routine)) await editLines(app, p.path, (ls) => { rArchived += archiveRoutineLines(ls, id); });
+  for (const p of (await loadAll(app)).projects.filter((x) => x.routine)) await editLines(app, p.path, (ls) => { rArchived += archiveRoutineLines(ls, id); });
 
-  const wins = oneLine(await env.prompt("Wins — what moved forward? (optional)", "", true));
-  const lessons = oneLine(await env.prompt("What got in the way / what will you change? (optional)", "", true));
-  const energy = await env.suggest(["5 — great", "4 — good", "3 — okay", "2 — low", "1 — drained", "Skip"], [5, 4, 3, 2, 1, null], "Energy this week");
+  const wins = oneLine(ans.wins), lessons = oneLine(ans.lessons), energy = ans.energy || null;
   const fields = [];
   if (wins) fields.push(`- Wins:: ${wins}`);
   if (lessons) fields.push(`- Lessons:: ${lessons}`);
   if (energy) fields.push(`- Energy:: ${energy}`);
   if (rLine) fields.push(`- Routines:: ${rLine}`);
-
-  const canSummarize = !env.isMobile || String(cfg.llm_mobile).toLowerCase() === "url";
-  const wantAi = canSummarize ? await env.suggest(["Write a short AI summary with the local model", "No summary"], [true, false], "Summary") : false;
-  if (wantAi) {
+  if (ans.ai) {
     try {
       const w = (await loadAll(app)).weekMap.get(id);
       const facts = w.goals.map((g) => `- ${g.projectName}: "${g.text}" → ${g.score}%${g.fields.miss ? ` (reason: ${g.fields.miss})` : ""}; tasks done ${g.doneCount}/${g.counted.length}${g.cancelled.length ? `, ${g.cancelled.length} cancelled` : ""}`).join("\n");

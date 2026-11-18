@@ -104,7 +104,7 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | During the week | **Log time** / ⏱ | Logs hands-on (`active`) and unattended (`passive`) time on a task. Planning asks for an estimate (`est`). Week notes, project pages and Analytics compare estimates with time spent. |
 | During the week | **Sync calendar** / 🕒 | Tasks with a set time (`[time:: 14:30]`) become Google Calendar events; moving or deleting an event changes the task back. Tasks for any time of the day stay out. Home shows your calendar events among the day's tasks. |
 | During the week | **Cancel task** / ✖ | Cancels a task that's no longer needed (optional reason). It moves to `## Done` as `[-]`, leaves every list, and is left out of goal progress — done ÷ (planned − cancelled). The week note, project page and Analytics count it as cancelled. |
-| Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records the week's routine score, wins, lessons, and energy. |
+| Sunday | **Weekly review** | Scores each goal (achieved, partly, or missed, with the reason). Carries, returns, or drops unfinished tasks, and records the week's routine score, wins, lessons, and energy. Every question has ← Back; nothing is saved until the final *Save the review*. |
 | Anytime | **New project**, **Register projects** | Adds projects |
 
 ## Data format
