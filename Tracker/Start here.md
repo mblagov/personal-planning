@@ -205,6 +205,9 @@ Recurring routines live in **routine projects** — one per scope, e.g. `Project
 - **Home**: buttons, this week's goals with progress (reorder the projects with the ↑ ↓ buttons on each row — it moves the goal lines in the week note, so the week note and the focus list follow the same order), focus tasks (today / later this week / any day), the *Outside this week's focus* box, inbox count, 8-week momentum, what needs attention.
 - **Week note**: goals achieved, average progress, tasks done, done outside goals; then every goal with its bar and all the tasks picked for it (tick / edit / open right there).
 - **Project note**: objective, weeks in focus, average goal score, a 16-week focus strip, a **Planned** card (this week / next week: goal and tasks done) with a *Pick tasks* button, recent goals with scores and reasons. The tasks themselves are in the note's `## Planned` section.
+  - **＋ Add task** (on the Planned card): type a task (one per line for several) and, if you want, a **📅 deadline** — pick a date or a quick choice (Sunday, next Sunday, end of month), or leave it empty for none. **Add to backlog** puts it in `## Backlog`; **Add to this week** puts it in `## Planned` for the current week. Each task gets today's **➕ created date** (and your `task_tag`), so it's a normal Tasks-plugin task that planning, Home and the analysis pick up.
+  - **🧭 Objectives & key results** (OKR): **＋ Objective** adds an objective — where you want to be, qualitative, with an optional *by* date. **＋ KR** adds key results to it: a name and three numbers, **start → now → target**. Progress = (now − start) ÷ (target − start), so a target below the start (weight, costs, bounce rate) works too; an objective shows the average of its key results. **✎** edits — use it to update *now* as you go; **✕** removes (an objective with its key results). They're kept as plain bullets in the note's `## Objectives` section (not tasks, so they never show up as to-dos) — edit them by hand any time. The Active projects cards show each objective's progress, and **🔍 Tasks vs goals** checks your tasks against the objectives and key results too.
+  - **🧭 Check with the local model**: the model checks the objectives and key results against the OKR rules — an objective is qualitative, motivating, in your control and has a time frame; each has 2–5 key results that are measurable outcomes (not tasks), with a target, ambitious but realistic. It gives a verdict (good · needs work · poor), a summary, the problems for each objective or key result that breaks a rule — with a better wording shown as a **diff** you can **✔ Apply** (numbers and dates stay) — and key results that seem to be missing, which you can **Add** (start 0, now 0, the suggested target). Nothing changes until you press a button. The check is kept in `Tracker/AI/analysis.json`; it says when the objectives changed since.
   - **✨ Refine backlog** (needs the local model): the model reads the open tasks in `## Backlog` and proposes **clearer wording** for vague ones (a verb first, short, specific — names, numbers, links and #tags kept) and **merges** of items that are the same work. Each proposal is shown as a **diff** — the old line with removed words struck through in red, the new one with added words in green — and nothing changes until you press **✔ Apply** on it (**Skip** drops it). Dates, priorities and fields stay; only the wording changes. A merge keeps one task and notes the others under it as `(merged) …`. If you edit a task after the proposal, its change is marked *changed since* and can't be applied — refine again.
   - **🔍 Tasks vs goals** (needs the local model): **Analyze** sends the open tasks (Planned, Unplanned, Backlog) and the goals (the project's objective, this and next week's goal) to the model. It answers with a short summary, up to five **missing tasks** needed to reach a goal — add each to *This week* or the *Backlog* with one click — and groups of **possible duplicates** with a merged wording. **Merge** keeps one task (the one planned for a week, if any) with that text and its fields and dates; the others are removed and noted under it as `(merged) …` with their sub-items. ✕ dismisses a suggestion. The review is kept in `Tracker/AI/analysis.json`; when the tasks change it says so, and a merge whose tasks changed is refused — analyze again.
 - **Analytics**: last week vs your 4-week average, score per week with trend, tasks done vs planned, which projects got your weeks (heatmap), project table, why goals fell short, active projects you keep skipping, review notes.
@@ -213,6 +216,11 @@ Recurring routines live in **routine projects** — one per scope, e.g. `Project
 
 Project note (`Sailing/Sailing.md`):
 ```
+## Objectives
+- 🎯 Sail confidently single-handed [by:: 2027-06-30]
+	- Solo outings [start:: 0] [now:: 3] [target:: 10]
+	- Nights on board alone [start:: 0] [now:: 0] [target:: 4]
+
 ## Planned
 - [x] Call the marina [week:: 2026-W46] ⏳ 2026-11-10 ✅ 2026-11-10
 - [ ] Compare 3 yards [week:: 2026-W47] [from:: 2026-W46] 📅 2026-11-19
@@ -229,6 +237,7 @@ Week note (`Tracker/Weeks/2026-W46.md`) — only goals; the tasks show up under 
 - 🎯 Book winter berth [project:: [[Sailing]]]
 - 🎯 Publish post [project:: [[Blog]]] [result:: 40] [miss:: no-time] [from:: [[2026-W45]]]
 ```
+- `## Objectives`: `🎯` bullets are objectives (`[by::]` = optional date), the bullets under them key results with `[start::]` (empty = 0), `[now::]` and `[target::]`.
 - `[week:: …]` = the week a task is planned for. You can also add it by hand to any task in the project's folder (sub-notes included).
 - `[from:: …]` = weeks it was planned for before and moved on from. Those weeks count it as *planned, not done*, so your history stays honest.
 - `🎯` lines are goals (not tasks, so they don't show up in Tasks lists). `result` and `miss` are written by the review.

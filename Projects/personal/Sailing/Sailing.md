@@ -14,6 +14,11 @@ created: 2026-10-01
 await dv.view("Tracker/Views/tracker", {mode: "project"})
 ```
 
+## Objectives
+- 🎯 Boat safely laid up for winter and ready to launch in April [by:: 2027-04-15]
+	- Winter jobs done [start:: 0] [now:: 2] [target:: 8]
+	- Launch checklist items ready [start:: 0] [now:: 0] [target:: 12]
+
 ## Planned
 - [x] Call the marina about winter berths [week:: 2026-W46] ⏳ 2026-11-09 ✅ 2026-11-09
 - [ ] Compare quotes from 3 yards [week:: 2026-W46] [from:: 2026-W45] 📅 2026-11-13

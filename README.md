@@ -99,6 +99,8 @@ On a fresh install, `Config.md` starts with empty `project_roots`, and the sampl
 | After checking | **Apply inbox** | Files everything, asks about items without a destination (every menu has ← Back; ＋ New project creates one), adds one *Process new spendings* task, archives the inbox to `Inbox archive.md` and clears it. |
 | Anytime | **Projects** note | Set each project's priority (1 = top … 5 = someday) and status. **Plan week** lists projects by priority, and within a priority the ones you're already working on and closest to done first. The local LLM can rate each description (the inbox sorter relies on them) and draft one from the project's folder. |
 | Start of week | **Plan week** / **Plan project** | Asks which open tasks in `## Planned` are actually done and moves finished ones to `## Done`. Then you pick projects, write one goal each, and move tasks from `## Backlog` to `## Planned` with a day (⏳) and an optional deadline (📅). |
+| Anytime | **Project note** → *＋ Add task* | Adds a task (or several, one per line) to the backlog — or to this week — with today's ➕ created date and an optional 📅 deadline. |
+| Anytime | **Project note** → *Objectives & key results* | Set OKRs for the project: objectives with key results (start → now → target) and their progress. *Check with the local model* reviews them against the OKR rules and suggests fixes (shown as a diff, applied only when you press Apply) and missing key results. |
 | Anytime | **Project note** → *Refine backlog* | The local model proposes clearer wording and merges of duplicate backlog items; each change is shown as a diff and made only when you press Apply. |
 | Anytime | **Project note** → *Analyze* | The local LLM checks the open tasks against the objective and the week's goals: suggests missing tasks (add with one click) and merges duplicates. |
 | During the week | **Home** | Shows today's tasks, today's routines (below the project work), the next 7 days, and tasks due *outside this week's focus* |
@@ -191,7 +193,8 @@ See *Routines* in [Tracker/Start here.md](Tracker/Start%20here.md).
 7. **Routines time** (optional): add an estimate to the open occurrence of each routine you want to track, e.g. `[est:: 20m]` — later occurrences copy it.
 8. **Inbox note** (optional): `Tracker/Inbox.md` is never overwritten; if yours still has the old explanation at the top, copy the callout from the repo's `Tracker/Inbox.md`.
 9. **Google Calendar** (optional): fill in `calendar_client_id` / `calendar_client_secret` and run **Sync calendar** on the Mac — see *Start here → Google Calendar*.
-10. **iPhone**: nothing to install. Let the vault sync, then reopen Obsidian there.
+10. **Objectives** (optional): on a project page, **＋ Objective** creates the `## Objectives` section in that note. The `objective` property still works and is offered as the first objective.
+11. **iPhone**: nothing to install. Let the vault sync, then reopen Obsidian there.
 
 ## Settings
 

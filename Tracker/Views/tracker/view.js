@@ -169,6 +169,62 @@ function clockDialog(core, title, cur) {
   });
 }
 
+/** A small form. fields: [{k, label, sub, value, placeholder, type ("text" | "date" | "textarea" | "number"), quick: [[label, value]], required}].
+ *  Resolves {k: value} (trimmed strings), or null when cancelled. extra: [[label, values]] buttons that save with those values set. */
+function formDialog(title, hint, fields, okLabel = "Save", extra = []) {
+  return new Promise((resolve) => {
+    const escA = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+    if (!obsidian || !obsidian.Modal) {
+      const out = {};
+      for (const f of fields) { const v = window.prompt(`${title} — ${f.label}${f.sub ? ` (${f.sub})` : ""}`, f.value || ""); if (v === null) { resolve(null); return; } out[f.k] = v.trim(); }
+      resolve(out); return;
+    }
+    const modal = new obsidian.Modal(obsApp);
+    let result = null;
+    modal.titleEl.setText(title);
+    const el = modal.contentEl;
+    el.addClass("pt-time-modal");
+    el.innerHTML = (hint ? `<div class="pt-muted pt-hint">${hint}</div>` : "")
+      + fields.map((f) => `<div class="pt-time-field"><label><b>${f.label}</b>${f.sub ? `<span class="pt-muted">${f.sub}</span>` : ""}</label><div class="pt-time-input">`
+        + (f.type === "textarea" ? `<textarea data-k="${f.k}" rows="3" placeholder="${escA(f.placeholder)}">${escA(f.value)}</textarea>` : `<input type="${f.type || "text"}" data-k="${f.k}" placeholder="${escA(f.placeholder)}" value="${escA(f.value)}"${f.type === "number" ? ` step="any"` : ""}>`)
+        + (f.quick || []).map(([l, v], i) => `<button class="pt-mini" data-quick="${f.k}" data-v="${escA(v)}">${l}</button>`).join("")
+        + `</div></div>`).join("")
+      + `<div class="pt-actions"><button class="mod-cta" data-ok="1">${okLabel}</button>${extra.map(([l], i) => `<button data-extra="${i}">${l}</button>`).join("")}<button data-x="1">Cancel</button></div>`;
+    const inp = (k) => el.querySelector(`[data-k="${k}"]`);
+    el.querySelectorAll("button[data-quick]").forEach((b) => b.addEventListener("click", () => { inp(b.dataset.quick).value = b.dataset.v; }));
+    const ok = (over = {}) => {
+      const out = {};
+      for (const f of fields) {
+        const v = (inp(f.k).value || "").trim();
+        if (f.required && !v) { inp(f.k).addClass("pt-bad"); inp(f.k).focus(); return; }
+        out[f.k] = v;
+      }
+      result = Object.assign(out, over); modal.close();
+    };
+    el.querySelector("[data-ok]").addEventListener("click", () => ok());
+    el.querySelectorAll("button[data-extra]").forEach((b) => b.addEventListener("click", () => ok(extra[Number(b.dataset.extra)][1])));
+    el.querySelector("[data-x]").addEventListener("click", () => modal.close());
+    el.querySelectorAll("input").forEach((x) => x.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); ok(); } }));
+    modal.onClose = () => resolve(result);
+    modal.open();
+    setTimeout(() => { const first = el.querySelector("[data-k]"); if (first) first.focus(); }, 30);
+  });
+}
+function confirmDialog(title, text, okLabel) {
+  return new Promise((resolve) => {
+    if (!obsidian || !obsidian.Modal) { resolve(window.confirm(`${title}\n${text}`)); return; }
+    const modal = new obsidian.Modal(obsApp);
+    let result = false;
+    modal.titleEl.setText(title);
+    modal.contentEl.addClass("pt-time-modal");
+    modal.contentEl.innerHTML = `<div class="pt-hint">${text}</div><div class="pt-actions"><button class="mod-warning" data-ok="1">${okLabel}</button><button data-x="1">Keep it</button></div>`;
+    modal.contentEl.querySelector("[data-ok]").addEventListener("click", () => { result = true; modal.close(); });
+    modal.contentEl.querySelector("[data-x]").addEventListener("click", () => modal.close());
+    modal.onClose = () => resolve(result);
+    modal.open();
+  });
+}
+
 const root = dv.el("div", "", { cls: "pt-root" });
 try {
   const core = await loadCore();
@@ -257,6 +313,49 @@ try {
     root.querySelectorAll("button[data-move]").forEach((b) => b.addEventListener("click", async () => {
       root.querySelectorAll("button[data-move]").forEach((x) => { x.disabled = true; });
       try { if (!(await core.moveGoal(obsApp, b.dataset.week, b.dataset.raw, Number(b.dataset.move)))) notify("Couldn't move it — the week note changed. Try again."); }
+      catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
+      await draw();
+    }));
+
+    // Project page: ＋ Add task (➕ created date, optional 📅 deadline)
+    root.querySelectorAll("button[data-addtask]").forEach((b) => b.addEventListener("click", async () => {
+      const m = window.moment, iso = (x) => x.format("YYYY-MM-DD");
+      const v = await formDialog("＋ Add task", "Goes to the project's backlog with today's ➕ created date. One task per line.", [
+        { k: "text", label: "Task", sub: "start with a verb", type: "textarea", placeholder: "Book the haul-out", required: true },
+        { k: "due", label: "📅 Deadline", sub: "optional — leave empty for none", type: "date", quick: [["None", ""], ["Sunday", iso(m().endOf("isoWeek"))], ["Next Sunday", iso(m().add(1, "week").endOf("isoWeek"))], ["End of month", iso(m().endOf("month"))]] },
+      ], "Add to backlog", [["Add to this week", { week: true }]]);
+      if (!v) return;
+      try { notify(await core.addProjectTask(env, b.dataset.path, v.text, { due: v.due, week: !!v.week })); }
+      catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
+      await draw();
+    }));
+
+    // Project page: objectives & key results
+    root.querySelectorAll("button[data-okr]").forEach((b) => b.addEventListener("click", async () => {
+      const act = b.dataset.okr, ds = b.dataset;
+      let a = { raw: ds.raw };
+      if (act === "add-o" || act === "edit-o") {
+        const v = await formDialog(act === "add-o" ? "🎯 New objective" : "🎯 Edit objective", "Where do you want to be? Qualitative and motivating, one sentence — not a task, not a number.", [
+          { k: "text", label: "Objective", value: ds.text || "", placeholder: "Sail confidently single-handed", required: true },
+          { k: "by", label: "By", sub: "optional date", type: "date", value: ds.by || "" },
+        ]);
+        if (!v) return;
+        Object.assign(a, v);
+      } else if (act === "add-kr" || act === "edit-kr") {
+        const v = await formDialog(act === "add-kr" ? "＋ Key result" : "Key result", "A number that shows the objective is reached — an outcome, not a task. Progress = (now − start) ÷ (target − start), so a target below the start works too.", [
+          { k: "text", label: "Key result", value: ds.text || "", placeholder: "Solo outings", required: true },
+          { k: "start", label: "Start", sub: "where you began (empty = 0)", type: "number", value: ds.start || "" },
+          { k: "now", label: "Now", sub: "current value", type: "number", value: ds.now || "" },
+          { k: "target", label: "Target", type: "number", value: ds.target || "" },
+        ]);
+        if (!v) return;
+        Object.assign(a, v);
+      } else if (act === "del-o" || act === "del-kr") {
+        if (!(await confirmDialog(act === "del-o" ? "Remove objective?" : "Remove key result?", `“${(ds.text || "").replace(/</g, "&lt;")}”${act === "del-o" ? " and its key results" : ""} will be deleted from the note.`, "Remove"))) return;
+      }
+      root.querySelectorAll("button[data-okr]").forEach((x) => { x.disabled = true; });
+      if (act === "check") b.textContent = "Checking…";
+      try { const msg = await core.okrAction(env, act, ds.path, a, ds.i); if (msg) notify(msg); }
       catch (e) { console.error("[tracker]", e); notify(`Tracker: ${e.message || e}`); }
       await draw();
     }));

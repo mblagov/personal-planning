@@ -648,6 +648,7 @@ async function loadAll(app) {
     const lines = (await app.vault.cachedRead(p.file)).split("\n");
     linesByPath.set(p.path, lines);
     p.backlog = backlogItems(lines).sort(byPrioDue);
+    p.okr = parseOkr(lines);
     p.openPlanned = parseItems(lines).filter((t) => t.task && !t.parent && isOpen(t) && t.fields.week).length;
     const ns = findSection(lines, "Notes & ideas");
     p.notes = ns ? parseItems(lines, ns.start, ns.end).filter((i) => !i.parent) : [];
@@ -1125,6 +1126,8 @@ created: ${today}
 # ${name}
 
 ${PROJECT_BLOCK}
+
+## ${OKR_SEC}
 
 ## ${PLANNED_SEC}
 
@@ -2067,9 +2070,14 @@ function projectTasks(lines) {
   }
   return out;
 }
-function projectGoals(d, p) {
+function projectGoals(d, p, lines) {
   const gs = [];
-  if (p.objective) gs.push({ id: "G1", text: p.objective, label: "Objective" });
+  const okr = lines ? parseOkr(lines) : p.okr || [];
+  if (p.objective && !okr.some((o) => o.text === p.objective)) gs.push({ id: "G1", text: p.objective, label: "Objective" });
+  for (const o of okr) {
+    gs.push({ id: `G${gs.length + 1}`, text: o.text, label: `Objective${o.by ? ` by ${o.by}` : ""}` });
+    for (const k of o.krs) gs.push({ id: `G${gs.length + 1}`, text: `${k.text}${k.target !== null ? ` (now ${k.now ?? k.start ?? 0}, target ${k.target})` : ""}`, label: "Key result" });
+  }
   for (const [wid, label] of [[d.curId, "This week"], [shiftWeek(d.curId, 1), "Next week"]]) {
     const w = d.weekMap.get(wid), g = w ? w.goals.find((x) => x.projectPath === p.path) : null;
     if (g) gs.push({ id: `G${gs.length + 1}`, text: g.text, label: `${label} (${wid})`, week: wid });
@@ -2126,7 +2134,8 @@ async function analyzeProject(env, path) {
   const d = await loadAll(app);
   const p = d.byPath.get(path);
   if (!p || p.routine) throw new Error("not a project with tasks");
-  const tasks = projectTasks((await readPath(app, path)).split("\n")), goals = projectGoals(d, p);
+  const plines = (await readPath(app, path)).split("\n");
+  const tasks = projectTasks(plines), goals = projectGoals(d, p, plines);
   if (!tasks.length && !goals.length) throw new Error("no open tasks and no goals to compare yet");
   const out = extractJson(await llmChat(env, cfg, analysisMessages(p, goals, tasks, env.moment().format("YYYY-MM-DD")), ANALYSIS_SCHEMA(goals.map((g) => g.id), tasks.map((_, i) => `T${i + 1}`))));
   return Object.assign(normalizeAnalysis(out, goals, tasks), { goals: goals.map((g) => ({ id: g.id, text: g.text, label: g.label, week: g.week || null })), hash: analysisHash(tasks, goals), created: env.moment().format("YYYY-MM-DD HH:mm") });
@@ -2324,7 +2333,7 @@ function analysisCard(d, p, a, lines) {
   let h = `<div class="pt-card pt-ai"><div class="pt-card-head"><span class="pt-h">🔍 Tasks vs goals</span>${a ? `<span class="pt-muted">reviewed ${esc(a.created)}</span>` : ""}${btn("analyze", a ? "↻ Analyze again" : "Analyze with the local model", undefined, !a, "Check the open tasks against the objective and this / next week's goals, and look for duplicates")}</div>`;
   if (!a) return h + `<div class="pt-muted pt-hint">Finds tasks that are missing to reach the goals, and tasks that are the same work, so you can add or merge them.</div></div>`;
   const tasks = lines ? projectTasks(lines) : [];
-  if (lines && a.hash !== analysisHash(tasks, projectGoals(d, p))) h += `<div class="pt-muted pt-hint">The tasks or goals changed since this review.</div>`;
+  if (lines && a.hash !== analysisHash(tasks, projectGoals(d, p, lines))) h += `<div class="pt-muted pt-hint">The tasks or goals changed since this review.</div>`;
   if (a.summary) h += `<div class="pt-ai-summary">${esc(a.summary)}</div>`;
   const goalOf = (id) => (a.goals || []).find((g) => g.id === id);
   if (a.missing.length) {
@@ -4048,6 +4057,271 @@ function weekTaskList(d, w) {
   return h;
 }
 
+/* ------------------------------------------------------------------ add a task from the project page
+ * "＋ Add task" on a project page: one task per line, with a ➕ created date (and the task_tag), an optional 📅 deadline,
+ * into ## Backlog — or ## Planned for this week. */
+const cleanText = (s) => String(s || "").replace(/\s+/g, " ").trim();
+async function addProjectTask(env, path, text, { due = "", week = false } = {}) {
+  const { app } = env, cfg = getConfig(app);
+  const p = listProjects(app, cfg).find((x) => x.path === path);
+  if (!p) throw new Error("not a tracked project");
+  const descs = String(text || "").split(/\r?\n/).map((l) => cleanText(l.replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[.\]\s*)?/, ""))).filter(Boolean);
+  if (!descs.length) throw new Error("type the task first");
+  due = cleanText(due);
+  if (due && !/^\d{4}-\d{2}-\d{2}$/.test(due)) throw new Error("the deadline must be a date like 2026-12-31");
+  const today = env.moment().format("YYYY-MM-DD"), wid = weekId(env.moment());
+  const lines = descs.map((d) => {
+    let l = newTask(cfg, `- [ ] ${d}`, today);
+    if (week) l = setField(l, "week", wid);
+    return due ? setDate(l, "due", due) : l;
+  });
+  await addToSection(app, path, week ? PLANNED_SEC : "Backlog", lines);
+  const what = descs.length === 1 ? `“${descs[0]}”` : `${descs.length} tasks`;
+  return `Added ${what} to ${week ? `this week (${wid})` : "the backlog"}${due ? ` · 📅 ${due}` : ""}`;
+}
+
+/* ------------------------------------------------------------------ objectives & key results (OKR)
+ * In the project note, under ## Objectives (plain bullets, not tasks, so they never show up as to-dos):
+ *   - 🎯 Sail confidently single-handed [by:: 2027-06-30]
+ *   	- Solo outings [start:: 0] [now:: 3] [target:: 10]
+ * A key result's progress = (now − start) ÷ (target − start), so "lower is better" works too (start 90, target 80).
+ * An objective's progress is the average of its key results. The local model can check them against the OKR rules. */
+const OKR_SEC = "Objectives";
+function okrNum(v) {
+  const s = String(v ?? "").replace(/\s/g, "").replace(",", ".");
+  if (!/\d/.test(s)) return null;
+  const n = Number(s.replace(/[^\d.+-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+function krOf(k) {
+  const start = okrNum(k.fields.start), now = okrNum(k.fields.now), target = okrNum(k.fields.target);
+  const s0 = start ?? 0;
+  const progress = target !== null && target !== s0 ? clamp(Math.round((100 * ((now ?? s0) - s0)) / (target - s0)), 0, 100) : null;
+  return { line: k.line, raw: k.raw, text: k.desc, start, now, target, progress };
+}
+/** Objectives of a project note: [{raw, text, by, krs:[{raw, text, start, now, target, progress}], progress}]. */
+function parseOkr(lines) {
+  const s = findSection(lines || [], OKR_SEC);
+  if (!s) return [];
+  return parseItems(lines, s.start, s.end).filter((i) => !i.parent && !i.task && i.desc).map((o) => {
+    const krs = o.children.filter((c) => !c.task && c.desc).map(krOf);
+    const ps = krs.map((k) => k.progress).filter((v) => v !== null);
+    return { line: o.line, raw: o.raw, text: o.desc, by: o.fields.by || null, krs, progress: ps.length ? Math.round(mean(ps)) : null };
+  });
+}
+/** A bullet with new text and fields; other fields on the old line are kept ("" removes a field). */
+function okrLine(ws, text, fields, objective, old = "") {
+  let l = `${ws}- ${objective ? "🎯 " : ""}${cleanText(text)}`;
+  const all = Object.assign({}, old ? parseFields(old) : {}, fields);
+  for (const [k, v] of Object.entries(all)) if (v !== null && v !== undefined && String(v).trim() !== "") l = setField(l, k, String(v).trim());
+  return l;
+}
+function okrFields(a, objective) {
+  if (objective) {
+    const by = cleanText(a.by);
+    if (by && !/^\d{4}-\d{2}-\d{2}$/.test(by)) throw new Error("the date must look like 2027-06-30");
+    return { by };
+  }
+  const f = {};
+  for (const k of ["start", "now", "target"]) {
+    const v = cleanText(a[k]);
+    if (v && okrNum(v) === null) throw new Error(`${k} must be a number`);
+    f[k] = v;
+  }
+  return f;
+}
+/** Add lines to ## Objectives; a missing section is created above the task sections. */
+function insertOkrLines(ls, newLines) {
+  if (!findSection(ls, OKR_SEC)) {
+    const at = [PLANNED_SEC, UNPLANNED_SEC, "Backlog"].map((n) => findSection(ls, n)).filter(Boolean).sort((a, b) => a.head - b.head)[0];
+    if (at) { ls.splice(at.head, 0, ...(at.head > 0 && ls[at.head - 1].trim() !== "" ? [""] : []), `## ${OKR_SEC}`, ...newLines, ""); return; }
+  }
+  insertIntoSection(ls, OKR_SEC, newLines);
+}
+/** The item on `raw` inside ## Objectives, or null when the line changed. */
+function okrFind(ls, raw) {
+  const s = findSection(ls, OKR_SEC);
+  if (!s || !raw) return null;
+  return parseItems(ls, s.start, s.end).find((i) => i.raw === raw) || null;
+}
+function okrHash(okr) {
+  const str = okr.map((o) => [o.raw, ...o.krs.map((k) => k.raw)].join("\n")).join("\u0001");
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+function okrIds(okr) {
+  const ids = [];
+  okr.forEach((o, i) => { ids.push({ id: `O${i + 1}`, raw: o.raw, text: o.text, objective: true }); o.krs.forEach((k, j) => ids.push({ id: `K${i + 1}.${j + 1}`, raw: k.raw, text: k.text, objective: false, oRaw: o.raw })); });
+  return ids;
+}
+function okrMessages(p, okr, today) {
+  const num = (k) => (k.target === null ? "no numbers set" : `start ${k.start ?? 0}, now ${k.now ?? "not set"}, target ${k.target}`);
+  const system = "You coach people on OKRs (objectives and key results) in a personal planning system and check that they are set up well. You answer with one JSON object and nothing else.";
+  const user = `Project: ${p.name}${p.description ? ` — ${p.description}` : ""}
+Today: ${today}
+
+${okr.map((o, i) => `O${i + 1}: ${o.text} (${o.by ? `by ${o.by}` : "no date"})\n${o.krs.length ? o.krs.map((k, j) => `  K${i + 1}.${j + 1}: ${k.text} — ${num(k)}`).join("\n") : "  (no key results)"}`).join("\n")}
+
+The rules:
+- An objective says where you want to be: qualitative and motivating, one short sentence, within your own control, with a time frame (a date or a period). It is not a task and not a number.
+- Each objective has 2 to 5 key results.
+- A key result is measurable: a number with a start, a current value and a target. It is an outcome, not an activity or a task to tick off ("Reach 500 readers a month" rather than "Write blog posts"). Specific, ambitious but realistic by the objective's date. Together the key results show the objective is reached; no two measure the same thing.
+
+Answer:
+- "verdict": "good", "needs work" or "poor", for all of it.
+- "summary": one or two sentences: what is good and the most important fix.
+- "items": only the objectives and key results that break a rule. Each: "id", "problems" (short sentences: which rule and why), "rewrite" (a better wording that keeps the meaning, the names and the language; "" when the wording is fine and only a number or date is missing).
+- "add": key results that are missing — for an objective with fewer than 2, or whose key results clearly don't show it is reached. Each: "objective" (its id), "text", "target" (a number, or null), "why" (a few words). [] if none.
+
+Answer with JSON like {"verdict":"needs work","summary":"…","items":[{"id":"K1.2","problems":["An activity, not an outcome"],"rewrite":"Sail 3 days solo in a force 4"}],"add":[{"objective":"O1","text":"Nights on board alone","target":5,"why":"shows independence"}]}`;
+  return [{ role: "system", content: system }, { role: "user", content: user }];
+}
+const OKR_SCHEMA = (ids, oids) => ({ type: "object", properties: {
+  verdict: { type: "string", enum: ["good", "needs work", "poor"] },
+  summary: { type: "string" },
+  items: { type: "array", items: { type: "object", properties: { id: { type: "string", enum: ids }, problems: { type: "array", items: { type: "string" } }, rewrite: { type: "string" } }, required: ["id", "problems", "rewrite"], additionalProperties: false } },
+  add: { type: "array", items: { type: "object", properties: { objective: { type: "string", enum: oids }, text: { type: "string" }, target: { type: ["number", "null"] }, why: { type: "string" } }, required: ["objective", "text", "target", "why"], additionalProperties: false } },
+}, required: ["verdict", "summary", "items", "add"], additionalProperties: false });
+function normalizeOkrCheck(out, okr) {
+  const ids = okrIds(okr), byId = new Map(ids.map((x) => [x.id, x]));
+  const verdict = ["good", "needs work", "poor"].includes(String(out && out.verdict)) ? out.verdict : "needs work";
+  const items = [], seen = new Set();
+  for (const it of Array.isArray(out && out.items) ? out.items : []) {
+    const x = byId.get(String(it && it.id).trim());
+    const problems = (Array.isArray(it && it.problems) ? it.problems : []).map(cleanText).filter(Boolean);
+    if (!x || seen.has(x.id) || !problems.length) continue;
+    seen.add(x.id);
+    let rewrite = cleanText(it.rewrite).replace(/^🎯\s*/u, "");
+    if (rewrite.toLowerCase() === x.text.toLowerCase()) rewrite = "";
+    items.push({ id: x.id, raw: x.raw, text: x.text, objective: x.objective, problems, rewrite });
+  }
+  const add = [];
+  for (const a of Array.isArray(out && out.add) ? out.add : []) {
+    const o = byId.get(String(a && a.objective).trim()), text = cleanText(a && a.text);
+    if (!o || !o.objective || !text) continue;
+    add.push({ objective: o.id, oRaw: o.raw, oText: o.text, text, target: typeof (a && a.target) === "number" && Number.isFinite(a.target) ? a.target : null, why: cleanText(a.why) });
+  }
+  return { verdict, summary: cleanText(out && out.summary), items, add };
+}
+async function checkOkr(env, path) {
+  const { app } = env, cfg = getConfig(app);
+  const p = listProjects(app, cfg).find((x) => x.path === path);
+  if (!p) throw new Error("not a tracked project");
+  const okr = parseOkr((await readPath(app, path)).split("\n"));
+  if (!okr.length) throw new Error("add an objective first");
+  const ids = okrIds(okr);
+  const out = extractJson(await llmChat(env, cfg, okrMessages(p, okr, env.moment().format("YYYY-MM-DD")), OKR_SCHEMA(ids.map((x) => x.id), ids.filter((x) => x.objective).map((x) => x.id))));
+  return Object.assign(normalizeOkrCheck(out, okr), { hash: okrHash(okr), created: env.moment().format("YYYY-MM-DD HH:mm") });
+}
+/** Buttons on the OKR card. a = {raw, text, by, start, now, target}. Returns a message. */
+async function okrAction(env, act, path, a = {}, i) {
+  const { app } = env;
+  const key = `okr:${path}`;
+  let msg = "", ok = false;
+  const gone = () => new Error("that line changed in the note since — try again");
+  if (act === "add-o") {
+    const text = cleanText(a.text);
+    if (!text) throw new Error("type the objective first");
+    const line = okrLine("", text, okrFields(a, true), true);
+    await editLines(app, path, (ls) => insertOkrLines(ls, [line]));
+    return `Objective added: ${text}`;
+  }
+  if (act === "edit-o" || act === "edit-kr") {
+    const text = cleanText(a.text), objective = act === "edit-o", f = okrFields(a, objective);
+    if (!text) throw new Error("the text can't be empty");
+    await editLines(app, path, (ls) => { const it = okrFind(ls, a.raw); if (it) { ls[it.line] = okrLine(it.ws, text, f, objective, it.raw); ok = true; } });
+    if (!ok) throw gone();
+    return objective ? "Objective saved" : "Key result saved";
+  }
+  if (act === "add-kr") {
+    const text = cleanText(a.text);
+    if (!text) throw new Error("type the key result first");
+    const f = okrFields(a, false);
+    await editLines(app, path, (ls) => { const o = okrFind(ls, a.raw); if (o && !o.parent) { ls.splice(blockEnd(ls, o), 0, okrLine(o.ws + "\t", text, f, false)); ok = true; } });
+    if (!ok) throw gone();
+    return `Key result added: ${text}`;
+  }
+  if (act === "del-o" || act === "del-kr") {
+    await editLines(app, path, (ls) => { const it = okrFind(ls, a.raw); if (it) { ls.splice(it.line, blockEnd(ls, it) - it.line); ok = true; } });
+    if (!ok) throw gone();
+    return act === "del-o" ? "Objective and its key results removed" : "Key result removed";
+  }
+  const store = await loadAnalysis(app);
+  if (act === "check") {
+    const job = startJob(env, "🧭 Checking objectives & key results", 1);
+    job.step(1, (listProjects(app, getConfig(app)).find((x) => x.path === path) || {}).name || "");
+    try { store[key] = await checkOkr(env, path); }
+    catch (e) { if (e instanceof Stopped) return "Stopped — nothing changed."; throw e; }
+    finally { job.end(); }
+    await saveAnalysis(app, store);
+    const r = store[key];
+    return `🧭 OKRs: ${r.verdict}${r.items.length ? ` · ${r.items.length} to fix` : ""}${r.add.length ? ` · ${r.add.length} key result(s) suggested` : ""}`;
+  }
+  const r = store[key];
+  if (!r) throw new Error("no check yet — check with the local model first");
+  i = Number(i);
+  if (act === "check-clear") delete store[key];
+  else if (act === "check-apply" || act === "check-skip") {
+    const it = r.items[i];
+    if (!it) throw new Error("that suggestion is gone");
+    if (act === "check-apply") {
+      if (!it.rewrite) throw new Error("no new wording to apply — edit the numbers or the date instead");
+      await editLines(app, path, (ls) => { const x = okrFind(ls, it.raw); if (x) { ls[x.line] = okrLine(x.ws, it.rewrite, {}, it.objective, x.raw); ok = true; } });
+      if (!ok) throw gone();
+      msg = `Reworded: ${it.rewrite}`;
+    }
+    r.items.splice(i, 1);
+  } else if (act === "check-add" || act === "check-skip-add") {
+    const s = r.add[i];
+    if (!s) throw new Error("that suggestion is gone");
+    if (act === "check-add") {
+      await editLines(app, path, (ls) => { const o = okrFind(ls, s.oRaw); if (o) { ls.splice(blockEnd(ls, o), 0, okrLine(o.ws + "\t", s.text, s.target !== null ? { start: "0", now: "0", target: String(s.target) } : {}, false)); ok = true; } });
+      if (!ok) throw gone();
+      msg = `Key result added: ${s.text}${s.target === null ? " — set its numbers with ✎" : ""}`;
+    }
+    r.add.splice(i, 1);
+  } else throw new Error(`unknown action ${act}`);
+  if (store[key] && !r.items.length && !r.add.length && act !== "check-clear") r.done = true;
+  await saveAnalysis(app, store);
+  return msg;
+}
+function okrCard(d, p, lines) {
+  const okr = parseOkr(lines);
+  const r = (d.aiStore || {})[`okr:${p.path}`];
+  const attrs = (o) => Object.entries(o).filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => ` data-${k}="${esc(v)}"`).join("");
+  const btn = (act, label, data = {}, cta = false, title = "", dis = false) => `<button class="pt-mini${cta ? " mod-cta" : ""}" data-okr="${act}" data-path="${esc(p.path)}"${attrs(data)}${title ? ` title="${esc(title)}"` : ""}${dis ? " disabled" : ""}>${label}</button>`;
+  const fmtN = (v) => (v === null ? "–" : String(v));
+  let h = `<div class="pt-card pt-okr"><div class="pt-card-head"><span class="pt-h">🧭 Objectives & key results</span><span class="pt-muted">kept under “## ${OKR_SEC}” below</span>${btn("add-o", "＋ Objective", { text: okr.length ? "" : p.objective }, !okr.length, "Add an objective")}${okr.length ? btn("check", r ? "↻ Check again" : "🧭 Check with the local model", {}, !r, "The local model checks the objectives and key results against the OKR rules") : ""}</div>`;
+  if (!okr.length) return h + `<div class="pt-muted pt-hint">An objective is where you want to be — qualitative, with a date. Each has 2–5 key results: numbers that show you got there (start → now → target).${p.objective ? ` The objective in this project's properties is offered as a start.` : ""}</div></div>`;
+  okr.forEach((o) => {
+    h += `<div class="pt-okr-o"><div class="pt-okr-row"><span class="pt-okr-text"><b>🎯 ${esc(o.text)}</b>${o.by ? ` <span class="pt-muted">· by ${esc(getMoment()(o.by, "YYYY-MM-DD").format("D MMM YYYY"))}</span>` : ""}</span>`
+      + `<span class="pt-okr-prog">${o.progress === null ? `<span class="pt-muted">no numbers yet</span>` : `${bar(o.progress)}<span class="pt-num">${o.progress}%</span>`}</span>`
+      + `<span class="pt-ai-btns">${btn("add-kr", "＋ KR", { raw: o.raw }, false, "Add a key result")}${btn("edit-o", "✎", { raw: o.raw, text: o.text, by: o.by || "" }, false, "Edit")}${btn("del-o", "✕", { raw: o.raw, text: o.text }, false, "Remove this objective and its key results")}</span></div>`;
+    if (!o.krs.length) h += `<div class="pt-muted pt-hint pt-okr-kr">No key results yet — add 2 to 5 numbers that show this objective is reached.</div>`;
+    h += o.krs.map((k) => `<div class="pt-okr-row pt-okr-kr"><span class="pt-okr-text">${esc(k.text)}</span>`
+      + `<span class="pt-okr-prog">${k.target === null ? `<span class="pt-warn">no target</span>` : `${bar(k.progress)}<span class="pt-num" title="start ${fmtN(k.start ?? 0)}">${fmtN(k.now ?? k.start ?? 0)} / ${fmtN(k.target)}</span>`}</span>`
+      + `<span class="pt-ai-btns">${btn("edit-kr", "✎", { raw: k.raw, text: k.text, start: k.start ?? "", now: k.now ?? "", target: k.target ?? "" }, false, "Update the current value, or edit")}${btn("del-kr", "✕", { raw: k.raw, text: k.text }, false, "Remove this key result")}</span></div>`).join("");
+    h += `</div>`;
+  });
+  if (r) {
+    const stale = r.hash !== okrHash(okr), here = new Set(lines || []);
+    h += `<div class="pt-okr-check"><div class="pt-sub">Check <span class="pt-q pt-q-${r.verdict === "good" ? "good" : r.verdict === "poor" ? "weak" : "fair"}">${esc(r.verdict)}</span> <span class="pt-muted">${esc(r.created)}${stale ? " · the objectives changed since" : ""}</span></div>`;
+    if (r.summary) h += `<div class="pt-ai-summary">${esc(r.summary)}</div>`;
+    h += r.items.map((it, i) => {
+      const gone = !here.has(it.raw);
+      let diff = "";
+      if (it.rewrite) { const [o, nw] = wordDiff(it.text, it.rewrite); diff = `<div class="pt-diff-old">− ${o}</div><div class="pt-diff-new">+ ${nw}</div>`; }
+      return `<div class="pt-ai-row${gone ? " is-stale" : ""}"><div class="pt-diff"><div class="pt-diff-kind">${it.objective ? "Objective" : "Key result"} <span class="pt-muted">· ${esc(it.text)}</span></div><ul class="pt-list">${it.problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>${diff}${gone ? `<div class="pt-warn">changed since — skip or check again</div>` : ""}</div>`
+        + `<div class="pt-ai-btns">${it.rewrite ? btn("check-apply", "✔ Apply", { i }, true, "Use the new wording (numbers and dates stay)", gone) : ""}${btn("check-skip", it.rewrite ? "Skip" : "OK", { i }, false, "Dismiss")}</div></div>`;
+    }).join("");
+    if (r.add.length) h += `<div class="pt-sub">Key results to add <span class="pt-count">${r.add.length}</span></div>` + r.add.map((s, i) => `<div class="pt-ai-row"><div><b>＋ ${esc(s.text)}</b>${s.target !== null ? ` <span class="pt-muted">→ ${esc(s.target)}</span>` : ""}<div class="pt-muted">for: ${esc(s.oText)}${s.why ? ` · ${esc(s.why)}` : ""}</div></div><div class="pt-ai-btns">${btn("check-add", "Add", { i }, true, "Add as a key result (start 0, now 0)", !here.has(s.oRaw))}${btn("check-skip-add", "✕", { i }, false, "Dismiss")}</div></div>`).join("");
+    if (!r.items.length && !r.add.length) h += `<div class="pt-muted">${r.verdict === "good" && !r.done ? "Nothing to fix." : "All suggestions handled."} ${btn("check-clear", "OK")}</div>`;
+    h += `</div>`;
+  }
+  return h + `</div>`;
+}
+
 function renderProject(d, path) {
   const p = d.byPath.get(path);
   if (!p) return `<div class="pt pt-empty">Not a tracked project — add <code>type: project</code> to the frontmatter (or run <b>Register projects</b>).</div>`;
@@ -4085,7 +4359,9 @@ function renderProject(d, path) {
       <span class="pt-plan-goal">${x.goal ? `🎯 ${esc(x.goal.text)}` : `<span class="pt-muted">no goal</span>`}</span>
       <span class="pt-num">${total ? `${x.done}/${total} done${x.unpl ? ` <span class="pt-muted">· ${x.unpl} unplanned</span>` : ""}${x.moved ? ` <span class="pt-muted">· ${x.moved} moved on</span>` : ""}${x.cancelled ? ` <span class="pt-muted">· ${x.cancelled} cancelled</span>` : ""}` : x.cancelled ? `<span class="pt-muted">${x.cancelled} cancelled</span>` : `<span class="pt-muted">no tasks</span>`}</span></div>`;
   }
-  h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", true], ["Add tasks this week (unplanned)", "Add tasks"]])}</div>`;
+  const addBtn = `<button class="pt-btn mod-cta" data-addtask="1" data-path="${esc(p.path)}" title="Add a task to this project's backlog (with today's ➕ created date and an optional 📅 deadline)">＋ Add task</button>`;
+  h += `</div>${buttons([["Pick tasks for this / next week", "Plan project", false], ["Add tasks this week (unplanned)", "Add tasks"]]).replace(`<div class="pt-actions">`, `<div class="pt-actions">${addBtn}`)}</div>`;
+  h += okrCard(d, p, d.aiLines || []);
   h += analysisCard(d, p, (d.aiStore || {})[p.path], d.aiLines);
   h += refineCard(d, p, (d.aiStore || {})[`refine:${p.path}`], d.aiLines);
   const past = p.history.filter((x) => x.week < d.curId).slice(-8).reverse();
@@ -4235,7 +4511,7 @@ function renderActive(d) {
     h += `<div class="pt-card pt-proj-card pt-prio-${p.priority}" data-name="${esc(`${p.name} ${p.scope} ${p.description} ${p.keywords.join(" ")}`.toLowerCase())}">
       <div class="pt-card-head">${link(p.path, p.name, "pt-proj")}<span class="pt-badge">P${p.priority}</span></div>
       ${p.description ? `<div class="pt-muted pt-desc">${esc(p.description)}</div>` : ""}
-      ${p.objective ? `<div class="pt-objective">🎯 ${esc(p.objective)}</div>` : ""}
+      ${p.okr && p.okr.length ? p.okr.map((o) => `<div class="pt-okr-mini"><span>🎯 ${esc(o.text)}</span>${o.progress === null ? "" : `${bar(o.progress)}<span class="pt-num">${o.progress}%</span>`}</div>`).join("") : p.objective ? `<div class="pt-objective">🎯 ${esc(p.objective)}</div>` : ""}
       ${g ? `<div class="pt-goal-text">This week: ${esc(g.text)}</div><div class="pt-goal-bar">${bar(g.score)}<span class="pt-goal-num">${g.score}%</span><span class="pt-goal-tasks">${g.doneCount}/${g.counted.length} tasks</span></div>` : `<div class="pt-muted">Not in this week's plan</div>`}
       ${open.length ? `<ul class="pt-list">${open.slice(0, 3).map((t) => `<li>${esc(t.desc)}${t.scheduled || t.due ? ` <span class="pt-muted">${t.due ? "📅" : "⏳"} ${getMoment()(t.due || t.scheduled, "YYYY-MM-DD").format("ddd D")}</span>` : ""}</li>`).join("")}${open.length > 3 ? `<li class="pt-muted">+${open.length - 3} more</li>` : ""}</ul>` : ""}
       <div class="pt-muted pt-proj-foot">${left} open task(s) · ${p.lastFocus ? (p.weeksSince <= 0 ? "in focus this week" : `last focus ${p.weeksSince}w ago`) : "not started"}${p.avg !== null ? ` · avg ${p.avg}%` : ""}</div>
@@ -4327,7 +4603,7 @@ async function run(env, cmd, ...args) {
 module.exports = ptrack;
 module.exports.core = {
   CONFIG_PATH, VIEW_PATH, COMMANDS_FOLDER, DEFAULTS, MISS_REASONS,
-  getConfig, loadAll, render, run, makeEnv, descAction, projectAction, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
+  getConfig, loadAll, render, run, makeEnv, descAction, projectAction, addProjectTask, okrAction, parseOkr, okrMessages, normalizeOkrCheck, OKR_SEC, replaceDesc, moveGoal, loadDescStore, descHash, normalizeDescCheck, projectFolderText,
   wordDiff, normalizeRefine, backlogTasks, startJob, jobText, Stopped, feedStream, answerText, llmStats, statsText, batchMessages, cancelTask, cancelLine, isCancelled, syncCalendar, syncSummary, gcalConnected, gcalLoadState, setClock, parseClockRange, slotOf, fmtClock, pullSlot, GCAL_STATE, GCAL_TOKEN, parseDur, fmtDur, timeOf, setTimes, addTime, cleanRecurrence, tSum, Cancelled, Handoff, inboxFree, normalizeRecord, parseReview, inboxJobs, REVIEW_PATH, REVIEW_SNAP, INBOX_TEMPLATE, normPriority, PROJECT_PRIOS, rollRoutines, routinePathTest, nextOccurrence, ruleOf, freqOf, classifyTasks, toggleDoneLine, AI_REQ, AI_RES, SHORTCUT_SEP, splitMeta, getDate, setDate, prioOf, setPrio, newTask, isMoved,
   parseWeek, parseItems, parseFields, setField, setStatus, findSection, insertIntoSection, scoreGoal, inboxItems, backlogItems,
   normPriority, migratePriorities, weekId, weekStart, shiftWeek, weeksBetween, weekRange, weekNote, projectNote, itemMessages, notesMessages, extractJson, stripThink,
